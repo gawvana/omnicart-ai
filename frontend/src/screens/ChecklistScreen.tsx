@@ -100,14 +100,11 @@ export const ChecklistScreen: React.FC<ChecklistScreenProps> = ({
 
     const target = updated.find((i) => i.id === id);
     if (target && target.is_purchased) {
-      const price = parseFloat(target.price_paid) || 0;
-      const savings = price > 0 ? Math.round(price * 0.15) : 1500;
       onNotify?.({
         id: String(Date.now()),
-        type: "savings",
+        type: "success",
         title: `Куплено: ${target.item_name}`,
-        subtitle: "Сэкономлено на базаре Гулистана",
-        amount: `${savings.toLocaleString("ru-RU")} сум`,
+        subtitle: `${target.quantity} ${target.unit}`,
       });
     }
 
@@ -239,7 +236,7 @@ export const ChecklistScreen: React.FC<ChecklistScreenProps> = ({
   return (
     <div className="p-4 pb-28 space-y-4 text-white">
       {/* Top Header Card */}
-      <div className="p-4 rounded-3xl bg-zinc-950 border border-white/10 flex items-center justify-between">
+      <div className="p-4 rounded-3xl bg-white/10 backdrop-blur-2xl border border-white/20 shadow-[0_4px_30px_rgba(0,0,0,0.1)] flex items-center justify-between">
         <div>
           <span className="text-[10px] text-zinc-400 uppercase tracking-wider block">
             Базар Гулистана • Чек-лист
@@ -259,7 +256,7 @@ export const ChecklistScreen: React.FC<ChecklistScreenProps> = ({
           {/* Share Family Cart */}
           <button
             onClick={() => setIsShareModalOpen(true)}
-            className="p-2.5 rounded-2xl bg-white/[0.06] border border-white/10 hover:bg-white/10 text-white transition flex items-center gap-1.5 text-xs"
+            className="p-2.5 rounded-2xl bg-white/10 backdrop-blur-md border border-white/20 hover:bg-white/20 text-white transition flex items-center gap-1.5 text-xs shadow-lg"
             title="Поделиться с семьей"
           >
             <Users className="w-4 h-4 text-blue-400" />
@@ -269,7 +266,7 @@ export const ChecklistScreen: React.FC<ChecklistScreenProps> = ({
           <button
             onClick={fetchItems}
             disabled={isLoading}
-            className="p-2.5 rounded-2xl bg-white/[0.06] border border-white/10 hover:bg-white/10 text-white transition disabled:opacity-40"
+            className="p-2.5 rounded-2xl bg-white/10 backdrop-blur-md border border-white/20 hover:bg-white/20 text-white transition disabled:opacity-40 shadow-lg"
           >
             <RefreshCw className={`w-4 h-4 ${isLoading ? "animate-spin text-zinc-400" : ""}`} />
           </button>
@@ -278,7 +275,7 @@ export const ChecklistScreen: React.FC<ChecklistScreenProps> = ({
 
       {/* Smart Search & Autocomplete Input */}
       <div className="relative">
-        <div className="flex items-center gap-2 p-1.5 bg-zinc-950 border border-white/10 rounded-2xl focus-within:border-white/30 transition">
+        <div className="flex items-center gap-2 p-1.5 bg-white/10 backdrop-blur-2xl border border-white/20 rounded-2xl focus-within:border-white/40 transition shadow-[0_4px_30px_rgba(0,0,0,0.1)]">
           <div className="pl-2.5 text-zinc-500">
             <Search className="w-4 h-4" />
           </div>
@@ -306,7 +303,7 @@ export const ChecklistScreen: React.FC<ChecklistScreenProps> = ({
           <motion.div
             initial={{ opacity: 0, y: -4 }}
             animate={{ opacity: 1, y: 0 }}
-            className="absolute top-full left-0 right-0 mt-1 z-30 bg-zinc-950/95 backdrop-blur-2xl border border-white/15 rounded-2xl p-1.5 shadow-2xl space-y-1"
+            className="absolute top-full left-0 right-0 mt-1 z-30 bg-black/40 backdrop-blur-3xl border border-white/20 rounded-2xl p-1.5 shadow-[0_8px_32px_rgba(0,0,0,0.3)] space-y-1"
           >
             <div className="px-2.5 py-1 text-[10px] text-zinc-400 flex items-center justify-between border-b border-white/5">
               <span>Подсказки цен в Гулистане</span>
@@ -338,7 +335,7 @@ export const ChecklistScreen: React.FC<ChecklistScreenProps> = ({
 
       {/* Filter Chips & Aisle Toggle */}
       <div className="flex items-center justify-between gap-2">
-        <div className="flex gap-1 bg-white/[0.04] p-1 rounded-xl border border-white/10">
+        <div className="flex gap-1 bg-white/10 backdrop-blur-md p-1 rounded-xl border border-white/20 shadow-sm">
           <button
             onClick={() => setFilter("all")}
             className={`px-3 py-1 rounded-lg text-[11px] font-medium transition ${
@@ -369,8 +366,8 @@ export const ChecklistScreen: React.FC<ChecklistScreenProps> = ({
           onClick={() => setGroupByAisle(!groupByAisle)}
           className={`px-2.5 py-1.5 rounded-xl border text-[11px] font-medium flex items-center gap-1 transition ${
             groupByAisle
-              ? "bg-white/10 border-white/20 text-white"
-              : "border-white/10 text-zinc-400 hover:text-white"
+              ? "bg-white/20 backdrop-blur-md border-white/30 text-white shadow-sm"
+              : "border-white/10 text-zinc-300 hover:text-white hover:bg-white/5"
           }`}
         >
           <Tag className="w-3 h-3" />
@@ -476,10 +473,10 @@ const ItemCard: React.FC<ItemCardProps> = ({ item, onToggle, onDelete, onEditPri
 
   return (
     <div
-      className={`p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 ${
+      className={`p-3 rounded-2xl border transition-all flex items-center justify-between gap-3 shadow-sm ${
         item.is_purchased
-          ? "bg-white/[0.01] border-white/5 opacity-50"
-          : "bg-zinc-950 border-white/10 hover:border-white/20"
+          ? "bg-white/5 border-white/10 opacity-50 backdrop-blur-md"
+          : "bg-white/10 backdrop-blur-xl border-white/20 hover:bg-white/20 hover:border-white/30"
       }`}
     >
       <div className="flex items-center gap-3 min-w-0 flex-1">
@@ -516,10 +513,10 @@ const ItemCard: React.FC<ItemCardProps> = ({ item, onToggle, onDelete, onEditPri
         {/* Price button (opens crowdsource edit) */}
         <button
           onClick={() => onEditPrice(item.item_name, priceNum)}
-          className="text-right px-2 py-1 rounded-lg bg-white/[0.04] hover:bg-white/10 border border-white/5 transition"
+          className="text-right px-2.5 py-1.5 rounded-xl bg-white/10 hover:bg-white/20 border border-white/20 backdrop-blur-md transition shadow-inner"
           title="Нажмите, чтобы изменить цену"
         >
-          <div className="text-xs font-mono font-bold text-white">
+          <div className="text-[13px] font-mono font-bold text-white drop-shadow-md">
             {priceNum > 0 ? `${priceNum.toLocaleString("ru-RU")} с.` : "цена"}
           </div>
         </button>

@@ -3,17 +3,15 @@ import { motion, AnimatePresence } from "framer-motion";
 import {
   ShoppingBag,
   Store,
-  ChefHat,
   WifiOff,
 } from "lucide-react";
 
 import ChecklistScreen from "./screens/ChecklistScreen";
 import GulistonMarketScreen from "./screens/GulistonMarketScreen";
-import RecipeScreen from "./screens/RecipeScreen";
 import DynamicIsland, { IslandNotification } from "./components/DynamicIsland";
 import { OfflineStorage } from "./utils/offlineStorage";
 
-type TabType = "checklist" | "recipes" | "market";
+type TabType = "checklist" | "market";
 
 export const App: React.FC = () => {
   const [activeTab, setActiveTab] = useState<TabType>("checklist");
@@ -84,7 +82,7 @@ export const App: React.FC = () => {
       />
 
       {/* Top Header */}
-      <header className="sticky top-0 z-40 w-full px-4 pt-3 pb-2.5 bg-black/85 backdrop-blur-2xl border-b border-white/[0.07] flex items-center justify-between">
+      <header className="sticky top-0 z-40 w-full px-4 pt-3 pb-2.5 bg-white/10 backdrop-blur-3xl border-b border-white/20 flex items-center justify-between shadow-[0_4px_30px_rgba(0,0,0,0.1)]">
         <div className="flex items-center gap-2">
           <div className="w-6 h-6 rounded-md bg-white flex items-center justify-center text-black font-black text-xs">
             O
@@ -127,27 +125,7 @@ export const App: React.FC = () => {
             </motion.div>
           )}
 
-          {activeTab === "recipes" && (
-            <motion.div
-              key="recipes"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.15 }}
-            >
-              <RecipeScreen
-                onIngredientsAdded={(count) => {
-                  setNotification({
-                    id: String(Date.now()),
-                    type: "success",
-                    title: `Рецепт разобран!`,
-                    subtitle: `Добавлено ${count} продуктов в чек-лист`,
-                  });
-                  handleTabChange("checklist");
-                }}
-              />
-            </motion.div>
-          )}
+
 
           {activeTab === "market" && (
             <motion.div
@@ -171,9 +149,9 @@ export const App: React.FC = () => {
         </AnimatePresence>
       </div>
 
-      {/* iOS 26 Floating Frosted Glass Tab Bar */}
-      <nav className="fixed bottom-0 left-0 right-0 z-50 px-4 pb-safe pt-2 bg-black/80 backdrop-blur-2xl border-t border-white/[0.08]">
-        <div className="max-w-md mx-auto grid grid-cols-3 gap-1">
+      {/* iOS 26 Floating Frosted Glass Tab Bar - Liquid Glass */}
+      <nav className="fixed bottom-0 left-0 right-0 z-50 px-4 pb-safe pt-2 bg-white/5 backdrop-blur-3xl border-t border-white/20 shadow-[0_-4px_30px_rgba(0,0,0,0.1)]">
+        <div className="max-w-md mx-auto grid grid-cols-2 gap-1">
           {/* Tab 1: Checklist */}
           <button
             type="button"
@@ -188,19 +166,7 @@ export const App: React.FC = () => {
             <span className="text-[10px] font-medium mt-1">Чек-лист</span>
           </button>
 
-          {/* Tab 2: Recipes */}
-          <button
-            type="button"
-            onClick={() => handleTabChange("recipes")}
-            className={`flex flex-col items-center justify-center py-1.5 rounded-xl transition ${
-              activeTab === "recipes"
-                ? "text-white bg-white/[0.08]"
-                : "text-zinc-500 hover:text-zinc-300"
-            }`}
-          >
-            <ChefHat className="w-5 h-5" />
-            <span className="text-[10px] font-medium mt-1">Рецепты</span>
-          </button>
+
 
           {/* Tab 3: Guliston Market */}
           <button
