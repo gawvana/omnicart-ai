@@ -117,19 +117,24 @@ async def _init_resources() -> None:
         )
 
 
-def get_bot_dispatcher() -> tuple[Bot, Dispatcher]:
-    """Get or initialize singleton Bot and Dispatcher."""
-    global _bot, _dp
-    if _bot is None or _dp is None:
-        settings = get_settings()
-        _bot = Bot(
-            token=settings.telegram_bot_token,
-            default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-        )
+def get_dispatcher() -> Dispatcher:
+    """Get or initialize singleton Dispatcher."""
+    global _dp
+    if _dp is None:
         _dp = Dispatcher()
         from bot.handlers.start import router as start_router
         _dp.include_router(start_router)
-    return _bot, _dp
+    return _dp
+
+
+def get_bot_dispatcher() -> tuple[Bot, Dispatcher]:
+    """Get or initialize Bot and Dispatcher."""
+    settings = get_settings()
+    bot = Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    )
+    return bot, get_dispatcher()
 
 
 @asynccontextmanager
@@ -828,6 +833,7 @@ async def telegram_webhook(
     """
     Telegram Bot Webhook endpoint for serverless deployment.
     Receives Telegram updates via POST and dispatches them through aiogram.
+    Guarantees session closure so outgoing requests are sent before Lambda freezes.
     """
     settings = get_settings()
     if settings.telegram_webhook_secret and secret_token != settings.telegram_webhook_secret:
@@ -838,13 +844,17 @@ async def telegram_webhook(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}")
 
-    bot, dp = get_bot_dispatcher()
-    try:
-        update = Update.model_validate(body, context={"bot": bot})
-        await dp.feed_update(bot=bot, update=update, db_session=db)
-    except Exception as exc:
-        logger.exception("Error processing Telegram update: %s", exc)
-        return {"ok": False, "error": str(exc)}
+    dp = get_dispatcher()
+    async with Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    ) as bot:
+        try:
+            update = Update.model_validate(body, context={"bot": bot})
+            await dp.feed_update(bot=bot, update=update, db_session=db)
+        except Exception as exc:
+            logger.exception("Error processing Telegram update: %s", exc)
+            return {"ok": False, "error": str(exc)}
 
     return {"ok": True}
 
@@ -856,24 +866,104 @@ async def setup_bot_webhook(
 ) -> dict[str, Any]:
     """Helper endpoint to register webhook with Telegram Bot API."""
     settings = get_settings()
-    bot, _ = get_bot_dispatcher()
-
     url = webhook_url or f"{settings.telegram_webapp_url.rstrip('/')}/api/webhook"
     secret = settings.telegram_webhook_secret or None
 
-    await bot.set_webhook(
-        url=url,
-        secret_token=secret,
-        allowed_updates=["message", "callback_query"],
-        drop_pending_updates=True,
-    )
-    webhook_info = await bot.get_webhook_info()
-    return {
-        "status": "webhook_configured",
-        "url": webhook_info.url,
-        "has_custom_certificate": webhook_info.has_custom_certificate,
-        "pending_update_count": webhook_info.pending_update_count,
-    }
+    async with Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    ) as bot:
+        await bot.set_webhook(
+            url=url,
+            secret_token=secret,
+            allowed_updates=["message", "callback_query"],
+            drop_pending_updates=True,
+        )
+        webhook_info = await bot.get_webhook_info()
+        return {
+            "status": "webhook_configured",
+            "url": webhook_info.url,
+            "has_custom_certificate": webhook_info.has_custom_certificate,
+            "pending_update_count": webhook_info.pending_update_count,
+        }
+
+
+# ── Xiaomi Notes & Guliston Market Endpoints ─────────────────────────────────
+
+class XiaomiNotesImportBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=20000)
+
+
+@app.post("/api/v1/notes/import-xiaomi", tags=["Xiaomi Notes"])
+async def import_xiaomi_notes(
+    body: XiaomiNotesImportBody,
+    tg_user: AuthUser,
+    db: DBSession,
+) -> dict[str, Any]:
+    """Parse notes copied from Xiaomi Notes and import into user checklist."""
+    from services.xiaomi_notes_parser import XiaomiNotesParser
+
+    user = await get_or_create_user(tg_user, db)
+    parsed = XiaomiNotesParser.parse_note_text(body.text)
+
+    added = []
+    for it in parsed:
+        item = PurchaseHistory(
+            user_id=user.id,
+            item_name=it["item_name"],
+            quantity=it["quantity"],
+            unit=it["unit"],
+            price_paid=it["estimated_price"],
+            currency_code="UZS",
+            country_code="UZ",
+            city="Гулистан",
+            is_purchased=it["is_purchased"],
+            raw_input_text="Xiaomi Notes WebApp",
+        )
+        db.add(item)
+        added.append(it)
+
+    await db.commit()
+    return {"status": "success", "count": len(added), "items": added}
+
+
+class GulistonAdvisorBody(BaseModel):
+    items: Optional[list[str]] = None
+
+
+@app.post("/api/v1/market/guliston-advisor", tags=["Guliston Market"])
+async def get_guliston_advice_api(
+    body: GulistonAdvisorBody,
+    tg_user: AuthUser,
+    db: DBSession,
+) -> dict[str, Any]:
+    """Analyzes market items between Guliston Dehqon Bozori and Korzinka Guliston."""
+    from services.guliston_market_service import GulistonMarketService
+
+    user = await get_or_create_user(tg_user, db)
+    items_to_check = body.items
+    if not items_to_check:
+        res = await db.execute(
+            select(PurchaseHistory.item_name)
+            .where(PurchaseHistory.user_id == user.id, PurchaseHistory.is_purchased == False)
+            .limit(20)
+        )
+        items_to_check = list(res.scalars().all())
+
+    if not items_to_check:
+        items_to_check = ["говядина", "картофель", "лук", "растительное масло", "молоко", "яйца", "рис лазер"]
+
+    return GulistonMarketService.analyze_shopping_list(items_to_check)
+
+
+@app.get("/api/v1/market/plov-calculator", tags=["Guliston Market"])
+async def get_plov_calculator_api(
+    servings: int = Query(6, ge=1, le=100),
+) -> dict[str, Any]:
+    """Calculates plov ingredients and estimated cost in Guliston."""
+    from services.guliston_market_service import GulistonMarketService
+
+    return GulistonMarketService.get_plov_calculator(servings)
 
 
 @app.get("/api/cron")

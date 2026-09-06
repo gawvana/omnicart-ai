@@ -133,21 +133,21 @@ class UserSettings(Base):
         unique=True,
         nullable=False,
     )
-    country_code: Mapped[str] = mapped_column(String(3), default="US")
-    city: Mapped[str] = mapped_column(String(255), default="New York")
-    currency_code: Mapped[str] = mapped_column(String(3), default="USD")
+    country_code: Mapped[str] = mapped_column(String(3), default="UZ")
+    city: Mapped[str] = mapped_column(String(255), default="Гулистан")
+    currency_code: Mapped[str] = mapped_column(String(3), default="UZS")
     measurement_system: Mapped[str] = mapped_column(
         String(10), default="metric"
     )  # 'metric' | 'imperial'
     dietary_preferences: Mapped[Optional[dict]] = mapped_column(
         JSON, default=dict
-    )  # e.g. {"vegan": true, "halal": true}
+    )  # e.g. {"halal": true}
     monthly_budget: Mapped[Optional[Decimal]] = mapped_column(
         Numeric(12, 2), nullable=True
     )
-    timezone: Mapped[str] = mapped_column(String(50), default="UTC")
+    timezone: Mapped[str] = mapped_column(String(50), default="Asia/Tashkent")
     shopping_culture: Mapped[str] = mapped_column(
-        String(20), default="supermarket"
+        String(20), default="mixed"
     )  # 'bazaar' | 'supermarket' | 'mixed'
 
     created_at: Mapped[datetime] = mapped_column(
