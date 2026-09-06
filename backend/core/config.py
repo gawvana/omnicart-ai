@@ -62,11 +62,45 @@ class Settings(BaseSettings):
 
     # ── Computed ──────────────────────────────────────────────
 
+    @field_validator("rate_limit_per_minute", mode="before")
+    @classmethod
+    def parse_rate_limit(cls, v: object) -> int:
+        if v is None or v == "":
+            return 60
+        return int(v)
+
+    @field_validator("debug", mode="before")
+    @classmethod
+    def parse_debug(cls, v: object) -> bool:
+        if v is None or v == "":
+            return False
+        if isinstance(v, str):
+            return v.lower() in ("true", "1", "t", "yes")
+        return bool(v)
+
+    @field_validator("log_level", mode="before")
+    @classmethod
+    def parse_log_level(cls, v: object) -> str:
+        if not v or str(v).upper() not in ("DEBUG", "INFO", "WARNING", "ERROR", "CRITICAL"):
+            return "INFO"
+        return str(v).upper()
+
+    @field_validator("allowed_origins", mode="before")
+    @classmethod
+    def parse_allowed_origins(cls, v: object) -> str:
+        if not v:
+            return "*"
+        return str(v)
+
     @field_validator("database_url", mode="before")
     @classmethod
     def assemble_database_url(cls, v: str, info: object) -> str:
         if v:
-            url = v.strip()
+            url = str(v).strip()
+            if url.startswith("sqlite"):
+                if os.environ.get("VERCEL"):
+                    return "sqlite+aiosqlite:////tmp/omnicart.db"
+                return url
             # Standardize postgres prefix for asyncpg (e.g. from Neon / Supabase / Heroku)
             if url.startswith("postgres://"):
                 url = "postgresql+asyncpg://" + url[len("postgres://"):]
