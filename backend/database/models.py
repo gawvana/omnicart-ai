@@ -97,8 +97,11 @@ class User(Base):
     )
     username: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
     first_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    language_code: Mapped[str] = mapped_column(String(10), default="en")
+    language_code: Mapped[str] = mapped_column(String(10), default="ru")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
+    family_cart_id: Mapped[Optional[uuid.UUID]] = mapped_column(
+        Uuid(as_uuid=True), nullable=True, index=True
+    )
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), default=_utcnow, server_default=func.now()
@@ -222,13 +225,14 @@ class PurchaseHistory(Base):
     )
     raw_input_text: Mapped[Optional[str]] = mapped_column(Text, nullable=True)
     item_name: Mapped[str] = mapped_column(String(255), nullable=False)
-    quantity: Mapped[Decimal] = mapped_column(Numeric(10, 3), nullable=False)
-    unit: Mapped[str] = mapped_column(String(20), default="kg")
-    price_paid: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    currency_code: Mapped[str] = mapped_column(String(3), default="USD")
+    category: Mapped[str] = mapped_column(String(100), default="Бакалея и специи")
+    quantity: Mapped[Decimal] = mapped_column(Numeric(10, 3), default=Decimal("1.0"), nullable=False)
+    unit: Mapped[str] = mapped_column(String(20), default="кг")
+    price_paid: Mapped[Decimal] = mapped_column(Numeric(12, 2), default=Decimal("0.0"), nullable=False)
+    currency_code: Mapped[str] = mapped_column(String(3), default="UZS")
     store_name: Mapped[Optional[str]] = mapped_column(String(255), nullable=True)
-    country_code: Mapped[str] = mapped_column(String(3), default="US")
-    city: Mapped[str] = mapped_column(String(255), default="")
+    country_code: Mapped[str] = mapped_column(String(3), default="UZ")
+    city: Mapped[str] = mapped_column(String(255), default="Гулистан")
     is_purchased: Mapped[bool] = mapped_column(Boolean, default=False)
     ai_parsed_data: Mapped[Optional[dict]] = mapped_column(JSON, nullable=True)
 

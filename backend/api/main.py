@@ -27,7 +27,7 @@ from urllib.parse import parse_qs, unquote
 import httpx
 
 import redis.asyncio as aioredis
-from fastapi import Depends, FastAPI, Header, HTTPException, Query, Request, status
+from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Query, Request, status
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
@@ -50,6 +50,8 @@ from database.models import (
     hash_telegram_id,
 )
 from services.b_ai_client import BAIClient, BAIClientError
+from services.cron_parser import PriceCronService
+from services.universal_ai_parser import UniversalAIParser
 
 logger = logging.getLogger(__name__)
 
@@ -402,8 +404,9 @@ class PurchaseTextRequest(BaseModel):
 
 class AddItemRequest(BaseModel):
     item_name: str = Field(..., min_length=1, max_length=255)
-    quantity: Decimal = Field(..., gt=0)
-    unit: str = Field(default="kg", max_length=20)
+    category: Optional[str] = Field(default="🥫 Бакалея и специи", max_length=100)
+    quantity: Decimal = Field(default=Decimal("1.0"), gt=0)
+    unit: str = Field(default="кг", max_length=20)
     price_paid: Decimal = Field(default=Decimal("0"), ge=0)
     store_name: Optional[str] = Field(None, max_length=255)
 
@@ -415,6 +418,7 @@ class TogglePurchasedRequest(BaseModel):
 class ChecklistItemResponse(BaseModel):
     id: str
     item_name: str
+    category: str = "🥫 Бакалея и специи"
     quantity: str
     unit: str
     price_paid: str
@@ -527,11 +531,12 @@ async def get_checklist(
     include_purchased: bool = Query(False),
 ) -> list[ChecklistItemResponse]:
     user = await get_or_create_user(tg_user, db)
+    cart_id = user.family_cart_id if user.family_cart_id else user.id
 
-    query = select(PurchaseHistory).where(PurchaseHistory.user_id == user.id)
+    query = select(PurchaseHistory).where(PurchaseHistory.user_id == cart_id)
     if not include_purchased:
         query = query.where(PurchaseHistory.is_purchased == False)  # noqa: E712
-    query = query.order_by(PurchaseHistory.created_at.desc())
+    query = query.order_by(PurchaseHistory.is_purchased.asc(), PurchaseHistory.category.asc(), PurchaseHistory.created_at.desc())
 
     result = await db.execute(query)
     items = result.scalars().all()
@@ -540,10 +545,11 @@ async def get_checklist(
         ChecklistItemResponse(
             id=str(item.id),
             item_name=item.item_name,
+            category=item.category or "🥫 Бакалея и специи",
             quantity=str(item.quantity),
             unit=item.unit,
             price_paid=str(item.price_paid),
-            currency_code=item.currency_code,
+            currency_code=item.currency_code or "UZS",
             store_name=item.store_name,
             is_purchased=item.is_purchased,
             created_at=item.created_at.isoformat(),
@@ -559,18 +565,20 @@ async def add_checklist_item(
     db: DBSession,
 ) -> ChecklistItemResponse:
     user = await get_or_create_user(tg_user, db)
-    user_settings = user.settings
+    cart_id = user.family_cart_id if user.family_cart_id else user.id
+    cat = body.category or UniversalAIParser._categorize_fallback(body.item_name)
 
     item = PurchaseHistory(
-        user_id=user.id,
+        user_id=cart_id,
         item_name=_sanitize_string(body.item_name),
+        category=cat,
         quantity=body.quantity,
         unit=body.unit,
         price_paid=body.price_paid,
-        currency_code=user_settings.currency_code if user_settings else "USD",
+        currency_code="UZS",
         store_name=_sanitize_string(body.store_name) if body.store_name else None,
-        country_code=user_settings.country_code if user_settings else "US",
-        city=user_settings.city if user_settings else "",
+        country_code="UZ",
+        city="Гулистан",
         is_purchased=False,
     )
     db.add(item)
@@ -580,6 +588,7 @@ async def add_checklist_item(
     return ChecklistItemResponse(
         id=str(item.id),
         item_name=item.item_name,
+        category=item.category,
         quantity=str(item.quantity),
         unit=item.unit,
         price_paid=str(item.price_paid),
@@ -822,18 +831,42 @@ async def telegram_webhook_info() -> dict[str, str]:
     return {"status": "ok", "message": "OmniCart AI Telegram Webhook is active and waiting for POST updates"}
 
 
+async def _process_telegram_update(body: dict[str, Any]) -> None:
+    """Background processor for Telegram updates to prevent webhook timeouts."""
+    settings = get_settings()
+    dp = get_dispatcher()
+    async with Bot(
+        token=settings.telegram_bot_token,
+        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+    ) as bot:
+        try:
+            session_factory = _session_factory
+            if session_factory is None:
+                await _init_resources()
+                session_factory = _session_factory
+
+            if session_factory:
+                async with session_factory() as db:
+                    update = Update.model_validate(body, context={"bot": bot})
+                    await dp.feed_update(bot=bot, update=update, db_session=db)
+            else:
+                logger.error("No DB session factory available for update processing")
+        except Exception as exc:
+            logger.exception("Error processing Telegram update in background: %s", exc)
+
+
 @app.post("/api/webhook")
 @app.post("/api/webhook.py")
 @app.post("/webhook")
 async def telegram_webhook(
     request: Request,
+    background_tasks: BackgroundTasks,
     secret_token: Annotated[Optional[str], Header(alias="X-Telegram-Bot-Api-Secret-Token")] = None,
-    db: AsyncSession = Depends(get_db),
 ) -> dict[str, Any]:
     """
-    Telegram Bot Webhook endpoint for serverless deployment.
-    Receives Telegram updates via POST and dispatches them through aiogram.
-    Guarantees session closure so outgoing requests are sent before Lambda freezes.
+    Lightning-fast Telegram Bot Webhook endpoint.
+    Instantly responds {"ok": True} (<50ms) to prevent timeouts and duplicate retry loops.
+    Heavy processing is handed off to background tasks.
     """
     settings = get_settings()
     if settings.telegram_webhook_secret and secret_token != settings.telegram_webhook_secret:
@@ -844,18 +877,7 @@ async def telegram_webhook(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}")
 
-    dp = get_dispatcher()
-    async with Bot(
-        token=settings.telegram_bot_token,
-        default=DefaultBotProperties(parse_mode=ParseMode.HTML),
-    ) as bot:
-        try:
-            update = Update.model_validate(body, context={"bot": bot})
-            await dp.feed_update(bot=bot, update=update, db_session=db)
-        except Exception as exc:
-            logger.exception("Error processing Telegram update: %s", exc)
-            return {"ok": False, "error": str(exc)}
-
+    background_tasks.add_task(_process_telegram_update, body)
     return {"ok": True}
 
 
@@ -900,28 +922,29 @@ async def import_xiaomi_notes(
     tg_user: AuthUser,
     db: DBSession,
 ) -> dict[str, Any]:
-    """Parse notes copied from Xiaomi Notes and import into user checklist."""
-    from services.xiaomi_notes_parser import XiaomiNotesParser
-
+    """Parse notes copied from Xiaomi Notes or any app and import into user checklist."""
     user = await get_or_create_user(tg_user, db)
-    parsed = XiaomiNotesParser.parse_note_text(body.text)
+    cart_id = user.family_cart_id if user.family_cart_id else user.id
+
+    parsed_result = await UniversalAIParser.parse_any_text(body.text)
 
     added = []
-    for it in parsed:
+    for it in parsed_result.items:
         item = PurchaseHistory(
-            user_id=user.id,
-            item_name=it["item_name"],
-            quantity=it["quantity"],
-            unit=it["unit"],
-            price_paid=it["estimated_price"],
+            user_id=cart_id,
+            item_name=it.name,
+            category=it.category,
+            quantity=Decimal(str(it.qty)),
+            unit=it.unit,
+            price_paid=Decimal(str(it.estimated_price)),
             currency_code="UZS",
             country_code="UZ",
             city="Гулистан",
-            is_purchased=it["is_purchased"],
-            raw_input_text="Xiaomi Notes WebApp",
+            is_purchased=False,
+            raw_input_text="AI Import WebApp",
         )
         db.add(item)
-        added.append(it)
+        added.append(it.model_dump())
 
     await db.commit()
     return {"status": "success", "count": len(added), "items": added}
@@ -989,12 +1012,104 @@ async def cron_trigger(
     intervals_updated = await compute_replenishment_intervals(ctx)
     prices_updated = await update_price_index_from_purchases(ctx)
 
+    # Also sync daily Redis market prices
+    redis = await get_redis()
+    await PriceCronService.sync_daily_prices(redis)
+
     return {
         "status": "success",
         "timestamp": datetime.now(timezone.utc).isoformat(),
         "replenishment_intervals_updated": intervals_updated,
         "price_indexes_processed": prices_updated,
     }
+
+
+# ── Fast Market Autocomplete & Crowdsourcing ─────────────────────────────────
+
+@app.get("/api/v1/market/autocomplete", tags=["Guliston Market"])
+async def market_autocomplete(
+    q: str = Query(..., min_length=1, max_length=100),
+) -> dict[str, Any]:
+    """Sub-15ms fast autocomplete from Upstash Redis cache."""
+    redis = await get_redis()
+    matches = await PriceCronService.autocomplete(q, redis, limit=6)
+    return {"query": q, "results": matches}
+
+
+class ReportPriceBody(BaseModel):
+    item_name: str = Field(..., min_length=1, max_length=100)
+    price: float = Field(..., gt=0)
+
+
+@app.post("/api/v1/market/report-price", tags=["Guliston Market"])
+async def report_market_price(
+    body: ReportPriceBody,
+) -> dict[str, Any]:
+    """Crowdsourcing: user reports actual price at Guliston bazaar."""
+    redis = await get_redis()
+    await PriceCronService.update_user_price(body.item_name, body.price, redis)
+    return {"status": "success", "item": body.item_name, "price": body.price}
+
+
+@app.get("/api/cron/sync-prices")
+@app.post("/api/cron/sync-prices")
+async def cron_sync_prices(
+    request: Request,
+) -> dict[str, Any]:
+    """Syncs bazaar & supermarket prices to Upstash Redis."""
+    redis = await get_redis()
+    result = await PriceCronService.sync_daily_prices(redis)
+    return result
+
+
+# ── Family Cart & AI Core Endpoints ──────────────────────────────────────────
+
+class JoinFamilyBody(BaseModel):
+    family_cart_id: str
+
+
+@app.post("/api/v1/cart/join-family", tags=["Family Cart"])
+async def join_family_cart(
+    body: JoinFamilyBody,
+    tg_user: AuthUser,
+    db: DBSession,
+) -> dict[str, Any]:
+    """Joins another user's family cart for shared real-time shopping."""
+    user = await get_or_create_user(tg_user, db)
+    try:
+        target_uuid = uuid.UUID(body.family_cart_id)
+        user.family_cart_id = target_uuid
+        await db.commit()
+        return {"status": "joined", "family_cart_id": str(target_uuid)}
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail=f"Invalid family cart UUID: {exc}")
+
+
+class UniversalParseBody(BaseModel):
+    text: str = Field(..., min_length=1, max_length=20000)
+
+
+@app.post("/api/v1/ai/parse-text", tags=["AI Core"])
+async def parse_text_endpoint(
+    body: UniversalParseBody,
+) -> dict[str, Any]:
+    """Universal AI parser for any free text or copied notes."""
+    result = await UniversalAIParser.parse_any_text(body.text)
+    return result.model_dump()
+
+
+class RecipeParseBody(BaseModel):
+    recipe: str = Field(..., min_length=1, max_length=20000)
+    servings: int = Field(default=4, ge=1, le=50)
+
+
+@app.post("/api/v1/ai/parse-recipe", tags=["AI Core"])
+async def parse_recipe_endpoint(
+    body: RecipeParseBody,
+) -> dict[str, Any]:
+    """Reverse recipe analysis: scales ingredients for N servings."""
+    result = await UniversalAIParser.parse_recipe(body.recipe, servings=body.servings)
+    return result.model_dump()
 
 
 # ── Error Handlers ───────────────────────────────────────────────────────────

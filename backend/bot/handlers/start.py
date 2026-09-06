@@ -1,25 +1,31 @@
 """
-OmniCart AI — Telegram Bot Handlers (Russian, iOS 26 Aesthetic).
-Supports both Pure Telegram Bot Mode (interactive checklists, Xiaomi Notes import,
-Guliston market advice) and Telegram Mini App (TMA).
+OmniCart AI — Streamlined Telegram Bot Handlers (Phases 1-5).
+Features:
+- Minimalist 3-button bottom keyboard: [📋 Мой список, 🛒 Добавить регулярные, 🚀 Открыть приложение]
+- Vibrant, grouped emoji formatting for high readability on the bazaar floor (🥩, 🥦, 🍞, 🥛, 🧼)
+- Universal AI parser for any text / copied Xiaomi notes
+- Voice message handler (Whisper Voice-to-JSON)
+- Recipe analysis & ingredient scaling
+- Family Cart synchronization via deep-links (/start cart_<id>)
 """
 
 from __future__ import annotations
 
+import io
 import logging
 import re
 import uuid
+from decimal import Decimal
 from typing import Any, Optional
 
 from aiogram import Bot, Dispatcher, F, Router, types
 from aiogram.enums import ParseMode
-from aiogram.filters import Command, CommandStart
+from aiogram.filters import Command, CommandObject, CommandStart
 from aiogram.types import (
     CallbackQuery,
     InlineKeyboardButton,
     InlineKeyboardMarkup,
     KeyboardButton,
-    MenuButtonWebApp,
     Message,
     ReplyKeyboardMarkup,
     WebAppInfo,
@@ -30,32 +36,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 
 from core.config import get_settings
 from database.models import PurchaseHistory, User, UserSettings, hash_telegram_id
-from services.b_ai_client import BAIClient, BAIClientError
-from services.guliston_market_service import GulistonMarketService
-from services.xiaomi_notes_parser import XiaomiNotesParser
+from services.b_ai_client import BAIClient
+from services.cron_parser import PriceCronService
+from services.universal_ai_parser import UniversalAIParser
 
 logger = logging.getLogger(__name__)
 
 router = Router(name="start")
 
 
-# ── Persistent Main Menu Keyboard (Reply Keyboard) ───────────────────────────
+# ── Clean 3-Button Bottom Keyboard (Phase 1) ────────────────────────────────
 
 def get_main_reply_keyboard(webapp_url: str) -> ReplyKeyboardMarkup:
-    """Persistent bottom keyboard for fast pure-bot actions."""
+    """Streamlined persistent keyboard with only 3 essential actions."""
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="📋 Чек-лист покупок"),
-                KeyboardButton(text="📝 Из Xiaomi Заметок"),
+                KeyboardButton(text="📋 Мой список"),
+                KeyboardButton(text="🛒 Добавить регулярные"),
             ],
             [
-                KeyboardButton(text="🏛 Корзинка vs Базар"),
-                KeyboardButton(text="💡 Регулярные товары"),
-            ],
-            [
-                KeyboardButton(text="🍲 Калькулятор плова"),
-                KeyboardButton(text="🚀 Открыть Mini App", web_app=WebAppInfo(url=webapp_url)),
+                KeyboardButton(text="🚀 Открыть приложение", web_app=WebAppInfo(url=webapp_url)),
             ],
         ],
         resize_keyboard=True,
@@ -80,6 +81,7 @@ async def get_or_create_user(session: AsyncSession, tg_user: types.User) -> User
             username=tg_user.username[:255] if tg_user.username else None,
             first_name=tg_user.first_name[:255] if tg_user.first_name else None,
             language_code="ru",
+            family_cart_id=None,
         )
         session.add(db_user)
         user_settings = UserSettings(
@@ -108,102 +110,133 @@ async def get_or_create_user(session: AsyncSession, tg_user: types.User) -> User
     return db_user
 
 
-# ── Helper: Render Interactive Checklist in Chat ────────────────────────────
+def get_effective_cart_id(user: User) -> uuid.UUID:
+    """Returns user's own ID or their shared family cart ID."""
+    return user.family_cart_id if user.family_cart_id else user.id
+
+
+# ── Helper: Render In-Chat Checklist with Emojis & Market Aisles ────────────
 
 async def render_checklist_message(
-    session: AsyncSession, user_id: uuid.UUID, webapp_url: str
+    session: AsyncSession, db_user: User, webapp_url: str
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """Generates an in-chat interactive checklist with inline checkmark toggles."""
+    """
+    Renders shopping list grouped by bazaar aisles with clear emojis for instant
+    glance reading while walking in the market.
+    """
+    cart_id = get_effective_cart_id(db_user)
+    is_family = bool(db_user.family_cart_id)
+
     result = await session.execute(
         select(PurchaseHistory)
-        .where(PurchaseHistory.user_id == user_id)
-        .order_by(PurchaseHistory.is_purchased.asc(), PurchaseHistory.created_at.desc())
-        .limit(20)
+        .where(PurchaseHistory.user_id == cart_id)
+        .order_by(PurchaseHistory.is_purchased.asc(), PurchaseHistory.category.asc(), PurchaseHistory.created_at.desc())
+        .limit(25)
     )
     items = result.scalars().all()
 
     if not items:
+        family_tag = f" 👥 {hitalic('(Семейная корзина)')}" if is_family else ""
         text = (
-            f"📋 {hbold('Ваш чек-лист пуст')}\n\n"
-            f"Вы можете:\n"
-            f"• Написать продукты сообщением (например: {hitalic('картошка 2кг, молоко 1л, масло')})\n"
-            f"• Вставить список из {hbold('Заметок Xiaomi')}\n"
-            f"• Добавить регулярные товары через кнопку ниже"
+            f"📋 {hbold('Ваш список покупок пуст')}{family_tag}\n\n"
+            f"⚡️ {hbold('Как добавить товары:')}\n"
+            f"• 🎙 Надиктуйте голосовое: {hitalic('«Купи 2 кг говядины и 3 лепешки»')}\n"
+            f"• 📝 Отправьте любой текст или скопируйте из {hbold('Заметок')}\n"
+            f"• 🍲 Скиньте рецепт для расчета ингредиентов\n"
+            f"• Или нажмите кнопку {hbold('«🛒 Добавить регулярные»')} ниже"
         )
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="💡 Добавить регулярные товары",
+                        text="🛒 Добавить регулярные товары",
                         callback_data="add_staples_quick",
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        text="🚀 Открыть Mini App",
+                        text="🔗 Поделиться с семьей",
+                        callback_data="share_family_cart",
+                    ),
+                    InlineKeyboardButton(
+                        text="🚀 В приложение",
                         web_app=WebAppInfo(url=webapp_url),
-                    )
+                    ),
                 ],
             ]
         )
         return text, kb
 
-    pending_count = sum(1 for i in items if not i.is_purchased)
-    purchased_count = len(items) - pending_count
+    pending_items = [i for i in items if not i.is_purchased]
+    purchased_items = [i for i in items if i.is_purchased]
+
+    total_est = sum(float(i.price_paid or 0) for i in pending_items)
+    family_header = " 👥 Семейная корзина" if is_family else " 📍 Базар Гулистан"
 
     lines = [
-        f"📋 {hbold('Список покупок (Гулистан)')}",
-        f"Осталось: {hbold(str(pending_count))}  |  Куплено: {purchased_count}\n",
+        f"📋 {hbold('Список покупок')}{family_header}",
+        f"Осталось купить: {hbold(str(len(pending_items)))} | В корзине: {len(purchased_items)}",
     ]
+    if total_est > 0:
+        lines.append(f"💰 Сумма: {hbold(f'{total_est:,.0f}')} сум\n")
+    else:
+        lines.append("")
+
+    # Group pending items by bazaar aisles
+    grouped: dict[str, list[PurchaseHistory]] = {}
+    for it in pending_items:
+        cat = it.category or "🥫 Бакалея и специи"
+        grouped.setdefault(cat, []).append(it)
 
     inline_rows: list[list[InlineKeyboardButton]] = []
 
-    for idx, item in enumerate(items[:12], 1):
-        status_sym = "✓" if item.is_purchased else " "
-        line_item = f"[{status_sym}] {item.item_name}"
-        if item.quantity and item.quantity > 0:
-            qty = item.quantity
-            qty_str = f"{qty:.0f}" if qty == int(qty) else f"{qty:.1f}"
-            line_item += f" — {qty_str} {item.unit}"
-        if item.price_paid and item.price_paid > 0:
-            line_item += f" (~{item.price_paid:,.0f} сум)"
+    # Display pending items grouped by aisle
+    item_num = 1
+    for cat_name, cat_items in grouped.items():
+        lines.append(hbold(cat_name))
+        for it in cat_items:
+            qty_str = f"{it.quantity:.0f}" if it.quantity == int(it.quantity) else f"{it.quantity:.1f}"
+            price_str = f" (~{it.price_paid:,.0f} сум)" if it.price_paid and it.price_paid > 0 else ""
+            lines.append(f"  {item_num}. [ ] {it.item_name} — {qty_str} {it.unit}{price_str}")
 
-        lines.append(f"{idx}. {line_item}")
-
-        # Inline button toggle for each item
-        btn_text = f"✓ {item.item_name[:14]}" if not item.is_purchased else f"↩ {item.item_name[:14]}"
-        inline_rows.append(
-            [
+            # Inline toggle button
+            btn_title = f"✓ {it.item_name[:15]}"
+            inline_rows.append([
                 InlineKeyboardButton(
-                    text=btn_text,
-                    callback_data=f"chk_toggle:{str(item.id)[:8]}",
+                    text=btn_title,
+                    callback_data=f"chk_toggle:{str(it.id)[:8]}",
                 )
-            ]
-        )
+            ])
+            item_num += 1
+        lines.append("")
 
-    # Action buttons
+    # Display already purchased items at bottom
+    if purchased_items:
+        lines.append(hbold("✅ Уже куплено:"))
+        for pit in purchased_items[:6]:
+            lines.append(f"  <s>[x] {pit.item_name}</s>")
+
+    # Action row
     action_row = [
-        InlineKeyboardButton(text="🏛 Где выгоднее?", callback_data="chk_market_advise"),
+        InlineKeyboardButton(text="🔗 Поделиться", callback_data="share_family_cart"),
         InlineKeyboardButton(text="🗑 Очистить купленное", callback_data="chk_clear_done"),
     ]
     inline_rows.append(action_row)
-    inline_rows.append(
-        [
-            InlineKeyboardButton(
-                text="🚀 Открыть Mini App (iOS 26)",
-                web_app=WebAppInfo(url=webapp_url),
-            )
-        ]
-    )
+    inline_rows.append([
+        InlineKeyboardButton(
+            text="🚀 Открыть приложение (iOS 26)",
+            web_app=WebAppInfo(url=webapp_url),
+        )
+    ])
 
     return "\n".join(lines), InlineKeyboardMarkup(inline_keyboard=inline_rows)
 
 
-# ── /start Handler ───────────────────────────────────────────────────────────
+# ── /start Handler (with Deep-Link Family Cart support) ──────────────────────
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, db_session: Any, bot: Bot) -> None:
-    """Sleek iOS 26 style Russian welcome handler."""
+async def cmd_start(message: Message, command: CommandObject, db_session: Any, bot: Bot) -> None:
+    """Welcome handler supporting direct /start and deep-linked /start cart_<uuid>."""
     settings = get_settings()
     user = message.from_user
     if user is None:
@@ -211,368 +244,85 @@ async def cmd_start(message: Message, db_session: Any, bot: Bot) -> None:
 
     session: AsyncSession = db_session
     db_user = await get_or_create_user(session, user)
-
     webapp_url = settings.telegram_webapp_url.rstrip("/")
-    name = user.first_name or "Пользователь"
+
+    # Check deep-link argument (e.g. cart_a1b2c3d4-...)
+    if command.args and command.args.startswith("cart_"):
+        target_cart_id_str = command.args.replace("cart_", "").strip()
+        try:
+            target_uuid = uuid.UUID(target_cart_id_str)
+            db_user.family_cart_id = target_uuid
+            await session.commit()
+            await message.answer(
+                f"🎉 {hbold('Вы подключились к семейной корзине!')}\n\n"
+                f"Теперь ваши списки покупок синхронизированы. Все добавления и вычеркивания "
+                f"отображаются у всех участников в реальном времени.",
+                parse_mode=ParseMode.HTML,
+            )
+        except Exception as exc:
+            logger.warning("Invalid family cart deep-link: %s", exc)
 
     welcome_text = (
-        f"👋 Здравствуйте, {hbold(name)}!\n\n"
-        f"Добро пожаловать в {hbold('OmniCart AI')} — персональный ассистент покупок для "
-        f"{hbold('Гулистана и Сырдарьинской области')}.\n\n"
-        f"⚡️ {hbold('Что я умею делать:')}\n"
-        f"• {hbold('Чек-лист прямо в чате')} — вычеркивайте товары кнопками без открытия приложений\n"
-        f"• {hbold('Импорт из Xiaomi Заметок')} — отправьте скопированный список, я разберу его за секунду\n"
-        f"• {hbold('Аналитика рынка Гулистана')} — сравниваю цены в {hbold('Корзинке')} (ул. Сайхун) и на {hbold('Деҳқон Бозори')}\n"
-        f"• {hbold('Умный парсинг')} — напишите {hitalic('«купил 2кг мяса за 180 000 на базаре»')}, я сам всё запишу\n\n"
-        f"Используйте удобное меню внизу или откройте полноэкранный Mini App:"
+        f"👋 Здравствуйте, {hbold(user.first_name or 'Пользователь')}!\n\n"
+        f"Я — ваш умный ассистент покупок {hbold('OmniCart AI')} для рынка и магазинов "
+        f"{hbold('Гулистана')}.\n\n"
+        f"⚡️ {hbold('Быстрые возможности:')}\n"
+        f"• 🎙 {hbold('Голосовой ввод')} — надиктуйте товары голосом\n"
+        f"• 📝 {hbold('Любой текст')} — скопируйте список из Заметок, я сам всё разберу\n"
+        f"• 🍲 {hbold('Рецепты')} — пришлите рецепт, я вытащу граммовки на нужное число персон\n"
+        f"• 👥 {hbold('Семейная корзина')} — ходите на базар вместе с одного списка"
     )
 
     reply_kb = get_main_reply_keyboard(webapp_url)
+    chk_text, chk_kb = await render_checklist_message(session, db_user, webapp_url)
 
-    inline_kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🚀 Открыть Mini App (iOS 26)",
-                    web_app=WebAppInfo(url=webapp_url),
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Мой чек-лист",
-                    callback_data="show_checklist",
-                ),
-                InlineKeyboardButton(
-                    text="🏛 Корзинка vs Базар",
-                    callback_data="chk_market_advise",
-                ),
-            ],
-        ]
-    )
-
-    await message.answer(
-        welcome_text,
-        reply_markup=reply_kb,
-        parse_mode=ParseMode.HTML,
-    )
-
-    await message.answer(
-        "Быстрый доступ к чек-листу и аналитике цен:",
-        reply_markup=inline_kb,
-        parse_mode=ParseMode.HTML,
-    )
-
-    # Configure Telegram WebApp Menu button
-    try:
-        await bot.set_chat_menu_button(
-            chat_id=message.chat.id,
-            menu_button=MenuButtonWebApp(
-                text="OmniCart",
-                web_app=WebAppInfo(url=webapp_url),
-            ),
-        )
-    except Exception as exc:
-        logger.warning("Could not set chat menu button: %s", exc)
+    await message.answer(welcome_text, reply_markup=reply_kb, parse_mode=ParseMode.HTML)
+    await message.answer(chk_text, reply_markup=chk_kb, parse_mode=ParseMode.HTML)
 
 
-# ── Menu: Checklist (Chat view) ──────────────────────────────────────────────
+# ── Quick Bottom Menu Actions ────────────────────────────────────────────────
 
-@router.message(F.text.in_({"📋 Чек-лист покупок", "/list", "/checklist"}))
-async def msg_checklist(message: Message, db_session: Any) -> None:
-    settings = get_settings()
+@router.message(F.text.in_({"📋 Мой список", "📋 Чек-лист покупок"}))
+async def msg_show_checklist(message: Message, db_session: Any) -> None:
     session: AsyncSession = db_session
     user = message.from_user
     if not user:
         return
-
     db_user = await get_or_create_user(session, user)
-    text, kb = await render_checklist_message(session, db_user.id, settings.telegram_webapp_url)
+    settings = get_settings()
+
+    text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
     await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
-# ── Menu: Xiaomi Notes Import ────────────────────────────────────────────────
-
-@router.message(F.text.in_({"📝 Из Xiaomi Заметок", "/notes", "/import_notes"}))
-async def msg_xiaomi_notes_prompt(message: Message) -> None:
-    prompt = (
-        f"📝 {hbold('Импорт из Xiaomi Заметок (Mi Notes)')}\n\n"
-        f"Скопируйте ваш список из приложения {hbold('Заметки')} на телефоне Xiaomi и отправьте его сюда сообщением.\n\n"
-        f"Поддерживаются любые форматы:\n"
-        f"• Чекбоксы: {hcode('- [ ] Картошка 3кг по 4500')}\n"
-        f"• Точки и списки: {hcode('• Говядина 1.5кг')}\n"
-        f"• Простой текст: {hcode('молоко, масло, хлеб 2шт')}\n\n"
-        f"Отправьте текст прямо сейчас, и я добавлю все позиции в ваш чек-лист!"
-    )
-    await message.answer(prompt, parse_mode=ParseMode.HTML)
-
-
-# ── Menu: Guliston Market Advisor ────────────────────────────────────────────
-
-@router.message(F.text.in_({"🏛 Корзинка vs Базар", "/advisor", "/bazaar", "/market"}))
-async def msg_guliston_advisor(message: Message, db_session: Any) -> None:
+@router.message(F.text.in_({"🛒 Добавить регулярные", "💡 Регулярные товары"}))
+async def msg_add_staples(message: Message, db_session: Any) -> None:
     session: AsyncSession = db_session
     user = message.from_user
     if not user:
         return
-
     db_user = await get_or_create_user(session, user)
+    cart_id = get_effective_cart_id(db_user)
 
-    # Get active items from user's checklist
-    result = await session.execute(
-        select(PurchaseHistory.item_name)
-        .where(PurchaseHistory.user_id == db_user.id, PurchaseHistory.is_purchased == False)
-        .limit(20)
-    )
-    raw_names = result.scalars().all()
-    item_names = list(raw_names) if raw_names else ["говядина", "картофель", "лук", "растительное масло", "молоко", "яйца"]
-
-    analysis = GulistonMarketService.analyze_shopping_list(item_names)
-
-    lines = [
-        f"🏛 {hbold('Аналитика рынка: Гулистан (Сырдарья)')}\n",
-        f"Сравнение: {hbold('Деҳқон Бозори')} vs {hbold('Корзинка Гулистан (ул. Сайхун)')}\n",
+    staples = [
+        {"name": "Говядина мякоть", "qty": 1.5, "unit": "кг", "category": "🥩 Мясной отдел", "price": 135000},
+        {"name": "Картофель красный", "qty": 4.0, "unit": "кг", "category": "🥦 Овощные ряды", "price": 16000},
+        {"name": "Лук репчатый", "qty": 2.0, "unit": "кг", "category": "🥦 Овощные ряды", "price": 6000},
+        {"name": "Масло хлопковое 2л", "qty": 1.0, "unit": "бут", "category": "🥫 Бакалея и специи", "price": 37000},
+        {"name": "Лепешки тандырные", "qty": 3.0, "unit": "шт", "category": "🍞 Лепешки и выпечка", "price": 12000},
     ]
 
-    bazaar = analysis["bazaar"]
-    if bazaar["items"]:
-        lines.append(f"🥩 {hbold('Выгоднее на Деҳқон Бозори:')}")
-        for it in bazaar["items"]:
-            lines.append(f"  • {hbold(it['name'])}: ~{it['bazaar_price']:,} сум ({it['unit']})")
-            lines.append(f"    {hitalic(it['tip'])}")
-        lines.append(f"  Подсумма на базаре: {bazaar['estimated_subtotal']:,} сум\n")
-
-    supermarket = analysis["supermarket"]
-    if supermarket["items"]:
-        lines.append(f"🛒 {hbold('Выгоднее в Корзинке (ул. Сайхун):')}")
-        for it in supermarket["items"]:
-            lines.append(f"  • {hbold(it['name'])}: ~{it['supermarket_price']:,} сум ({it['unit']})")
-            lines.append(f"    {hitalic(it['tip'])}")
-        lines.append(f"  Подсумма в Корзинке: {supermarket['estimated_subtotal']:,} сум\n")
-
-    if analysis["estimated_savings"] > 0:
-        lines.append(f"💰 {hbold('Расчетная экономия:')} {analysis['estimated_savings']:,} сум")
-
-    lines.append(f"\n💡 {analysis['summary_advice']}")
-
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="🍲 Калькулятор плова (Гулистан)",
-                    callback_data="calc_plov_6",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Перейти к чек-листу",
-                    callback_data="show_checklist",
-                )
-            ],
-        ]
-    )
-
-    await message.answer("\n".join(lines), reply_markup=kb, parse_mode=ParseMode.HTML)
-
-
-# ── Menu: Regular Staples / Replenishment ───────────────────────────────────
-
-@router.message(F.text.in_({"💡 Регулярные товары", "/staples", "/regular"}))
-async def msg_regular_staples(message: Message) -> None:
-    staples = XiaomiNotesParser.generate_replenishment_checklist([])
-
-    lines = [
-        f"💡 {hbold('Регулярные товары для дома (Гулистан)')}\n",
-        "Продукты, которые обычно заканчиваются каждые несколько дней:\n",
-    ]
-
-    for idx, s in enumerate(staples, 1):
-        lines.append(f"{idx}. {hbold(s['item_name'])} — {s['quantity']} {s['unit']} ({s['reason']})")
-
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ Добавить всё в чек-лист",
-                    callback_data="add_all_staples",
-                )
-            ],
-            [
-                InlineKeyboardButton(
-                    text="📋 Открыть чек-лист",
-                    callback_data="show_checklist",
-                )
-            ],
-        ]
-    )
-
-    await message.answer("\n".join(lines), reply_markup=kb, parse_mode=ParseMode.HTML)
-
-
-# ── Menu: Plov Budget Calculator ─────────────────────────────────────────────
-
-@router.message(F.text.in_({"🍲 Калькулятор плова", "/plov"}))
-async def msg_plov_calculator(message: Message) -> None:
-    data = GulistonMarketService.get_plov_calculator(servings=6)
-
-    lines = [
-        f"🍲 {hbold('Калькулятор плова для Гулистана')} (на 6 человек)\n",
-        "Ингредиенты и расчет стоимости по ценам Деҳқон Бозори и Корзинки:\n",
-    ]
-
-    for ing in data["ingredients"]:
-        lines.append(f"• {hbold(ing['name'])}: {ing['amount']} — {ing['cost']:,} сум ({ing['where']})")
-
-    lines.append(f"\n💵 {hbold('Итого на плов:')} {data['total_uzs']:,} сум")
-    lines.append(f"👤 {hbold('На 1 порцию:')} ~{data['per_person_uzs']:,} сум")
-
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="➕ Добавить ингредиенты плова в список",
-                    callback_data="add_plov_ingredients",
-                )
-            ]
-        ]
-    )
-
-    await message.answer("\n".join(lines), reply_markup=kb, parse_mode=ParseMode.HTML)
-
-
-# ── Callback: Show Checklist ────────────────────────────────────────────────
-
-@router.callback_query(F.data == "show_checklist")
-async def cb_show_checklist(callback: CallbackQuery, db_session: Any) -> None:
-    settings = get_settings()
-    session: AsyncSession = db_session
-    user = callback.from_user
-    db_user = await get_or_create_user(session, user)
-
-    text, kb = await render_checklist_message(session, db_user.id, settings.telegram_webapp_url)
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-    await callback.answer()
-
-
-# ── Callback: Toggle Checklist Item ─────────────────────────────────────────
-
-@router.callback_query(F.data.startswith("chk_toggle:"))
-async def cb_toggle_item(callback: CallbackQuery, db_session: Any) -> None:
-    session: AsyncSession = db_session
-    user = callback.from_user
-    db_user = await get_or_create_user(session, user)
-
-    prefix_id = callback.data.split(":", 1)[1]
-
-    # Find item belonging to this user
-    result = await session.execute(
-        select(PurchaseHistory).where(PurchaseHistory.user_id == db_user.id)
-    )
-    items = result.scalars().all()
-
-    target_item = None
-    for it in items:
-        if str(it.id).startswith(prefix_id):
-            target_item = it
-            break
-
-    if target_item:
-        target_item.is_purchased = not target_item.is_purchased
-        await session.commit()
-        status_msg = "Куплено!" if target_item.is_purchased else "Возвращено в список"
-        await callback.answer(f"{target_item.item_name}: {status_msg}")
-    else:
-        await callback.answer("Элемент не найден")
-
-    settings = get_settings()
-    text, kb = await render_checklist_message(session, db_user.id, settings.telegram_webapp_url)
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
-
-# ── Callback: Clear Done Items ──────────────────────────────────────────────
-
-@router.callback_query(F.data == "chk_clear_done")
-async def cb_clear_done(callback: CallbackQuery, db_session: Any) -> None:
-    session: AsyncSession = db_session
-    user = callback.from_user
-    db_user = await get_or_create_user(session, user)
-
-    await session.execute(
-        delete(PurchaseHistory).where(
-            PurchaseHistory.user_id == db_user.id,
-            PurchaseHistory.is_purchased == True,
-        )
-    )
-    await session.commit()
-    await callback.answer("Купленные товары удалены!")
-
-    settings = get_settings()
-    text, kb = await render_checklist_message(session, db_user.id, settings.telegram_webapp_url)
-    if callback.message:
-        await callback.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
-
-# ── Callback: Market Advice from Checklist ──────────────────────────────────
-
-@router.callback_query(F.data == "chk_market_advise")
-async def cb_market_advise(callback: CallbackQuery, db_session: Any) -> None:
-    session: AsyncSession = db_session
-    user = callback.from_user
-    db_user = await get_or_create_user(session, user)
-
-    result = await session.execute(
-        select(PurchaseHistory.item_name)
-        .where(PurchaseHistory.user_id == db_user.id, PurchaseHistory.is_purchased == False)
-        .limit(20)
-    )
-    raw_names = result.scalars().all()
-    item_names = list(raw_names) if raw_names else ["говядина", "картофель", "лук", "растительное масло", "молоко"]
-
-    analysis = GulistonMarketService.analyze_shopping_list(item_names)
-
-    lines = [
-        f"🏛 {hbold('Советник по рынку Гулистана:')}\n",
-        f"💰 Экономия: {analysis['estimated_savings']:,} сум\n",
-        f"{analysis['summary_advice']}\n",
-    ]
-
-    kb = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [
-                InlineKeyboardButton(
-                    text="« Назад к чек-листу",
-                    callback_data="show_checklist",
-                )
-            ]
-        ]
-    )
-
-    if callback.message:
-        await callback.message.edit_text("\n".join(lines), reply_markup=kb, parse_mode=ParseMode.HTML)
-    await callback.answer()
-
-
-# ── Callback: Add Staples Quick ─────────────────────────────────────────────
-
-@router.callback_query(F.data.in_({"add_staples_quick", "add_all_staples"}))
-async def cb_add_all_staples(callback: CallbackQuery, db_session: Any) -> None:
-    session: AsyncSession = db_session
-    user = callback.from_user
-    db_user = await get_or_create_user(session, user)
-
-    staples = XiaomiNotesParser.generate_replenishment_checklist([])
     added = 0
-
-    for s in staples[:6]:
+    for s in staples:
         p = PurchaseHistory(
             id=uuid.uuid4(),
-            user_id=db_user.id,
-            raw_input_text="Регулярный товар",
-            item_name=s["item_name"],
-            quantity=s["quantity"],
+            user_id=cart_id,
+            raw_input_text="Регулярный базовый товар",
+            item_name=s["name"],
+            category=s["category"],
+            quantity=Decimal(str(s["qty"])),
             unit=s["unit"],
-            price_paid=0.0,
+            price_paid=Decimal(str(s["price"])),
             currency_code="UZS",
             country_code="UZ",
             city="Гулистан",
@@ -582,33 +332,241 @@ async def cb_add_all_staples(callback: CallbackQuery, db_session: Any) -> None:
         added += 1
 
     await session.commit()
-    await callback.answer(f"Добавлено {added} базовых товаров!")
+    settings = get_settings()
+    text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
+
+    await message.answer(f"✅ Добавлено {hbold(str(added))} регулярных товаров для дома!", parse_mode=ParseMode.HTML)
+    await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+
+# ── Voice Message Handler (Whisper Voice-to-JSON) ────────────────────────────
+
+@router.message(F.voice | F.audio)
+async def handle_voice_message(message: Message, db_session: Any, bot: Bot) -> None:
+    """Transcribes voice notes using Whisper and parses items through Universal AI Parser."""
+    user = message.from_user
+    if not user:
+        return
+
+    session: AsyncSession = db_session
+    db_user = await get_or_create_user(session, user)
+    cart_id = get_effective_cart_id(db_user)
+
+    status_msg = await message.answer("🎙 Слушаю и распознаю голосовое...")
+
+    try:
+        # Download voice file
+        file_id = message.voice.file_id if message.voice else message.audio.file_id
+        file_info = await bot.get_file(file_id)
+        file_bytes = io.BytesIO()
+        await bot.download_file(file_info.file_path, destination=file_bytes)
+        audio_data = file_bytes.getvalue()
+
+        # Transcribe via Whisper
+        async with BAIClient() as client:
+            transcription = await client.transcribe_audio(audio_data, filename="voice.ogg")
+
+        if not transcription:
+            await status_msg.edit_text("❌ Не удалось разобрать аудио. Попробуйте наговорить четче или напишите текстом.")
+            return
+
+        await status_msg.edit_text(f"🗣 {hitalic(f'«{transcription}»')}\n✨ Добавляю в список...")
+
+        # Parse through Universal AI Parser
+        parse_result = await UniversalAIParser.parse_any_text(transcription)
+
+        if not parse_result.items:
+            await status_msg.edit_text(f"🤔 Распознано: «{transcription}», но товары не найдены. Назовите продукты.")
+            return
+
+        for it in parse_result.items:
+            p = PurchaseHistory(
+                id=uuid.uuid4(),
+                user_id=cart_id,
+                raw_input_text=transcription,
+                item_name=it.name,
+                category=it.category,
+                quantity=Decimal(str(it.qty)),
+                unit=it.unit,
+                price_paid=Decimal(str(it.estimated_price)),
+                currency_code="UZS",
+                country_code="UZ",
+                city="Гулистан",
+                is_purchased=False,
+            )
+            session.add(p)
+
+        await session.commit()
+        settings = get_settings()
+        text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
+
+        await status_msg.edit_text(f"✅ Добавлено из голоса: {hbold(str(len(parse_result.items)))} поз.", parse_mode=ParseMode.HTML)
+        await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+    except Exception as exc:
+        logger.exception("Voice handling error: %s", exc)
+        await status_msg.edit_text("❌ Ошибка при обработке аудио. Попробуйте отправить текстом.")
+
+
+# ── Text & Recipe Handler (Universal Parser) ────────────────────────────────
+
+@router.message(F.text & ~F.text.startswith("/"))
+async def handle_text_or_recipe(message: Message, db_session: Any) -> None:
+    """Universal handler for free text, copied notes, and recipe links/texts."""
+    user = message.from_user
+    text = message.text
+    if not user or not text:
+        return
+
+    session: AsyncSession = db_session
+    db_user = await get_or_create_user(session, user)
+    cart_id = get_effective_cart_id(db_user)
+
+    # Check if text is a recipe or link
+    is_recipe = any(w in text.lower() for w in ["рецепт", "ингредиент", "порци", "приготовлени", "youtube.com", "youtu.be", "плов", "шурпа", "лагман", "манты"])
+
+    status_msg = await message.answer("✨ Разбираю запись нейросетью...")
+
+    try:
+        if is_recipe:
+            parse_result = await UniversalAIParser.parse_recipe(text, servings=4)
+        else:
+            parse_result = await UniversalAIParser.parse_any_text(text)
+
+        if not parse_result.items:
+            await status_msg.edit_text("🤔 Не удалось распознать товары. Напишите продукты, например: «картошка 2кг, мясо 1кг».")
+            return
+
+        added_count = 0
+        for it in parse_result.items:
+            p = PurchaseHistory(
+                id=uuid.uuid4(),
+                user_id=cart_id,
+                raw_input_text=text[:2000],
+                item_name=it.name,
+                category=it.category,
+                quantity=Decimal(str(it.qty)),
+                unit=it.unit,
+                price_paid=Decimal(str(it.estimated_price)),
+                currency_code="UZS",
+                country_code="UZ",
+                city="Гулистан",
+                is_purchased=False,
+            )
+            session.add(p)
+            added_count += 1
+
+        await session.commit()
+        settings = get_settings()
+        chk_text, chk_kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
+
+        tag = "по рецепту" if is_recipe else "в список"
+        await status_msg.edit_text(f"✅ Добавлено {tag}: {hbold(str(added_count))} позиций!", parse_mode=ParseMode.HTML)
+        await message.answer(chk_text, reply_markup=chk_kb, parse_mode=ParseMode.HTML)
+
+    except Exception as exc:
+        logger.exception("Text parse error: %s", exc)
+        await status_msg.edit_text("❌ Ошибка разбора. Попробуйте еще раз.")
+
+
+# ── Inline Callbacks (Toggles, Clear, Family Share) ──────────────────────────
+
+@router.callback_query(F.data.startswith("chk_toggle:"))
+async def cb_toggle_item(callback: CallbackQuery, db_session: Any) -> None:
+    session: AsyncSession = db_session
+    user = callback.from_user
+    db_user = await get_or_create_user(session, user)
+    cart_id = get_effective_cart_id(db_user)
+
+    prefix_id = callback.data.split(":", 1)[1]
+
+    result = await session.execute(
+        select(PurchaseHistory).where(PurchaseHistory.user_id == cart_id)
+    )
+    items = result.scalars().all()
+
+    target = next((it for it in items if str(it.id).startswith(prefix_id)), None)
+    if target:
+        target.is_purchased = not target.is_purchased
+        await session.commit()
+        status_word = "куплено!" if target.is_purchased else "возвращено"
+        await callback.answer(f"{target.item_name}: {status_word}")
+    else:
+        await callback.answer("Товар не найден")
 
     settings = get_settings()
-    text, kb = await render_checklist_message(session, db_user.id, settings.telegram_webapp_url)
+    text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
-# ── Callback: Add Plov Ingredients ──────────────────────────────────────────
+@router.callback_query(F.data == "chk_clear_done")
+async def cb_clear_done(callback: CallbackQuery, db_session: Any) -> None:
+    session: AsyncSession = db_session
+    user = callback.from_user
+    db_user = await get_or_create_user(session, user)
+    cart_id = get_effective_cart_id(db_user)
 
-@router.callback_query(F.data == "add_plov_ingredients")
-async def cb_add_plov(callback: CallbackQuery, db_session: Any) -> None:
+    await session.execute(
+        delete(PurchaseHistory).where(
+            PurchaseHistory.user_id == cart_id,
+            PurchaseHistory.is_purchased == True,
+        )
+    )
+    await session.commit()
+    await callback.answer("Купленные товары удалены!")
+
+    settings = get_settings()
+    text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
+    if callback.message:
+        await callback.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data == "share_family_cart")
+async def cb_share_family(callback: CallbackQuery, db_session: Any) -> None:
     session: AsyncSession = db_session
     user = callback.from_user
     db_user = await get_or_create_user(session, user)
 
-    plov_data = GulistonMarketService.get_plov_calculator(6)
+    # Share link is based on user's ID
+    share_link = f"https://t.me/gusop_bot?start=cart_{str(db_user.id)}"
 
-    for ing in plov_data["ingredients"]:
+    msg = (
+        f"🔗 {hbold('Ссылка на вашу семейную корзину:')}\n\n"
+        f"{hcode(share_link)}\n\n"
+        f"Отправьте эту ссылку супругу(е) или родственникам. При переходе их список "
+        f"автоматически объединится с вашим в реальном времени!"
+    )
+    await callback.answer()
+    if callback.message:
+        await callback.message.answer(msg, parse_mode=ParseMode.HTML)
+
+
+@router.callback_query(F.data == "add_staples_quick")
+async def cb_add_staples_quick(callback: CallbackQuery, db_session: Any) -> None:
+    session: AsyncSession = db_session
+    user = callback.from_user
+    db_user = await get_or_create_user(session, user)
+    cart_id = get_effective_cart_id(db_user)
+
+    staples = [
+        ("Говядина мякоть", 1.5, "кг", "🥩 Мясной отдел", 135000),
+        ("Картофель красный", 3.0, "кг", "🥦 Овощные ряды", 12000),
+        ("Лук репчатый", 2.0, "кг", "🥦 Овощные ряды", 6000),
+        ("Масло хлопковое", 1.0, "л", "🥫 Бакалея и специи", 18500),
+        ("Лепешки тандырные", 2.0, "шт", "🍞 Лепешки и выпечка", 8000),
+    ]
+
+    for name, qty, unit, cat, price in staples:
         p = PurchaseHistory(
             id=uuid.uuid4(),
-            user_id=db_user.id,
-            raw_input_text="Ингредиенты плова",
-            item_name=ing["name"],
-            quantity=1.0,
-            unit="порц",
-            price_paid=float(ing["cost"]),
+            user_id=cart_id,
+            raw_input_text="Быстрые регулярные",
+            item_name=name,
+            category=cat,
+            quantity=Decimal(str(qty)),
+            unit=unit,
+            price_paid=Decimal(str(price)),
             currency_code="UZS",
             country_code="UZ",
             city="Гулистан",
@@ -617,156 +575,9 @@ async def cb_add_plov(callback: CallbackQuery, db_session: Any) -> None:
         session.add(p)
 
     await session.commit()
-    await callback.answer("Ингредиенты для плова добавлены в список!")
+    await callback.answer("Базовые товары добавлены!")
 
     settings = get_settings()
-    text, kb = await render_checklist_message(session, db_user.id, settings.telegram_webapp_url)
+    text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
     if callback.message:
         await callback.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
-
-
-# ── Intelligent Message Handler (Xiaomi Notes detection + Natural parsing) ──
-
-@router.message(F.text & ~F.text.startswith("/"))
-async def handle_text_or_notes(message: Message, db_session: Any) -> None:
-    """
-    Intelligently handles incoming text:
-    1. Detects Xiaomi Notes format (multi-line, checkboxes, bullets).
-    2. Parses natural language grocery logs or purchases.
-    """
-    user = message.from_user
-    text = message.text
-    if user is None or not text:
-        return
-
-    session: AsyncSession = db_session
-    db_user = await get_or_create_user(session, user)
-
-    # Check if text looks like Xiaomi Notes export (multiple lines with list markers)
-    has_bullets = any(marker in text for marker in ["- [", "•", "*", "–", "\n"])
-    is_multiline_list = len(text.strip().splitlines()) >= 2
-
-    if has_bullets or is_multiline_list:
-        # Parse via XiaomiNotesParser
-        parsed_notes = XiaomiNotesParser.parse_note_text(text)
-
-        if parsed_notes and len(parsed_notes) >= 2:
-            added_count = 0
-            for item in parsed_notes:
-                purchase = PurchaseHistory(
-                    id=uuid.uuid4(),
-                    user_id=db_user.id,
-                    raw_input_text=text[:2000],
-                    item_name=item["item_name"],
-                    quantity=item["quantity"],
-                    unit=item["unit"],
-                    price_paid=item["estimated_price"],
-                    currency_code="UZS",
-                    country_code="UZ",
-                    city="Гулистан",
-                    is_purchased=item["is_purchased"],
-                )
-                session.add(purchase)
-                added_count += 1
-
-            await session.commit()
-
-            settings = get_settings()
-            chk_text, chk_kb = await render_checklist_message(session, db_user.id, settings.telegram_webapp_url)
-
-            success_msg = (
-                f"✅ {hbold('Импортировано из Заметок Xiaomi:')} {added_count} позиций!\n\n"
-                f"Список сохранен в ваш чек-лист:"
-            )
-            await message.answer(success_msg, parse_mode=ParseMode.HTML)
-            await message.answer(chk_text, reply_markup=chk_kb, parse_mode=ParseMode.HTML)
-            return
-
-    # Single-line purchase or query parsing via B.AI
-    processing_msg = await message.answer("✨ Обрабатываю запись...")
-
-    try:
-        async with BAIClient() as client:
-            parsed = await client.parse_purchase_text(
-                text[:2000],
-                country="UZ",
-                city="Гулистан",
-                currency="UZS",
-                measurement="metric",
-                shopping_culture="mixed",
-            )
-    except BAIClientError as exc:
-        logger.error("B.AI parse failed: %s", exc)
-        await processing_msg.edit_text("❌ Не удалось распознать запись. Попробуйте еще раз.")
-        return
-
-    if not parsed.items:
-        # Fallback: simple item addition
-        cleaned_item = re.sub(r"[^\w\sа-яА-ЯёЁўқғҳЎҚҒҲ0-9]", "", text).strip()[:100]
-        if cleaned_item:
-            purchase = PurchaseHistory(
-                id=uuid.uuid4(),
-                user_id=db_user.id,
-                raw_input_text=text,
-                item_name=cleaned_item.capitalize(),
-                quantity=1.0,
-                unit="шт",
-                price_paid=0.0,
-                currency_code="UZS",
-                country_code="UZ",
-                city="Гулистан",
-                is_purchased=False,
-            )
-            session.add(purchase)
-            await session.commit()
-
-            settings = get_settings()
-            chk_text, chk_kb = await render_checklist_message(session, db_user.id, settings.telegram_webapp_url)
-            await processing_msg.edit_text(
-                f"✅ Добавлено в список: {hbold(cleaned_item.capitalize())}",
-                parse_mode=ParseMode.HTML,
-            )
-            await message.answer(chk_text, reply_markup=chk_kb, parse_mode=ParseMode.HTML)
-        else:
-            await processing_msg.edit_text(
-                "🤔 Не удалось найти товары. Отправьте список продуктов или сумму."
-            )
-        return
-
-    # Save recognized items
-    saved_count = 0
-    for pi in parsed.items:
-        clean_name = re.sub(r"[\x00-\x08\x0b\x0c\x0e-\x1f]", "", pi.item_name)[:255]
-        purchase = PurchaseHistory(
-            id=uuid.uuid4(),
-            user_id=db_user.id,
-            raw_input_text=text[:2000],
-            item_name=clean_name.capitalize(),
-            quantity=pi.quantity,
-            unit=pi.unit,
-            price_paid=pi.price,
-            currency_code="UZS",
-            store_name=pi.store_name[:255] if pi.store_name else None,
-            country_code="UZ",
-            city="Гулистан",
-            is_purchased=False,
-            ai_parsed_data=pi.model_dump(mode="json"),
-        )
-        session.add(purchase)
-        saved_count += 1
-
-    await session.commit()
-
-    lines = [f"✅ Добавлено позиций: {hbold(str(saved_count))}\n"]
-    for pi in parsed.items:
-        qty = pi.quantity
-        qty_str = f"{qty:.0f}" if qty == int(qty) else f"{qty:.1f}"
-        price_str = f"{pi.price:,.0f}" if pi.price > 0 else "цена не указана"
-        store = f" ({pi.store_name})" if pi.store_name else ""
-        lines.append(f"  • {hbold(pi.item_name)}: {qty_str} {pi.unit} — {price_str} сум{store}")
-
-    settings = get_settings()
-    chk_text, chk_kb = await render_checklist_message(session, db_user.id, settings.telegram_webapp_url)
-
-    await processing_msg.edit_text("\n".join(lines), parse_mode=ParseMode.HTML)
-    await message.answer(chk_text, reply_markup=chk_kb, parse_mode=ParseMode.HTML)

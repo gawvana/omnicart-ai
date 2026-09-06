@@ -261,6 +261,32 @@ class BAIClient:
             text = "\n".join(lines[start:end]).strip()
         return text
 
+    async def transcribe_audio(
+        self,
+        audio_bytes: bytes,
+        filename: str = "voice.ogg",
+    ) -> str:
+        """
+        Transcribe voice note using OpenAI-compatible /audio/transcriptions endpoint.
+        """
+        client = self._get_client()
+        try:
+            files = {"file": (filename, audio_bytes, "audio/ogg")}
+            data = {"model": "whisper-1", "language": "ru"}
+            response = await client.post(
+                f"{self._base_url}/audio/transcriptions",
+                headers={"Authorization": f"Bearer {self._settings.bai_api_key}"},
+                files=files,
+                data=data,
+            )
+            if response.status_code == 200:
+                res_data = response.json()
+                return res_data.get("text", "")
+            logger.warning("Audio transcription returned status %d: %s", response.status_code, response.text[:200])
+        except Exception as exc:
+            logger.warning("Whisper audio transcription error: %s", exc)
+        return ""
+
     async def parse_purchase_text(
         self,
         user_text: str,
