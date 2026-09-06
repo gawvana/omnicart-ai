@@ -348,6 +348,13 @@ async def verify_and_rate_limit(
     return tg_user
 
 
+async def get_redis() -> aioredis.Redis | None:
+    global _redis
+    if _redis is None:
+        await _init_resources()
+    return _redis
+
+
 AuthUser = Annotated[TelegramUser, Depends(verify_and_rate_limit)]
 DBSession = Annotated[AsyncSession, Depends(get_db)]
 
