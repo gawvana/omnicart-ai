@@ -1,6 +1,10 @@
 /**
- * OmniCart AI — Offline Storage & Sync Queue.
- * Enables zero-latency interactions in covered bazaar areas with poor 3G reception.
+ * OmniCart AI — Resilient Offline Storage & Sync Queue (v2).
+ * Guarantees zero-latency bazaar interactions in low-connectivity areas.
+ * Features:
+ * - Schema versioning and corrupt JSON recovery (prevents white screens)
+ * - Structured pending sync queue (CREATE, UPDATE, DELETE) with client timestamps
+ * - Atomic snapshot persistence and queue flushing on network recovery
  */
 
 export interface CartItem {
@@ -14,99 +18,188 @@ export interface CartItem {
   store_name?: string;
   is_purchased: boolean;
   created_at: string;
+  updated_at?: number;
 }
 
-const STORAGE_KEY = "omnicart_items_v2";
-const QUEUE_KEY = "omnicart_pending_queue_v2";
+export type ShoppingItem = CartItem;
 
-interface PendingMutation {
-  type: "toggle" | "add" | "delete";
-  itemId?: string;
-  payload?: any;
-  timestamp: number;
+export interface SyncMutation {
+  action: "CREATE" | "UPDATE" | "DELETE";
+  item: CartItem;
+  clientTimestamp: number;
+}
+
+export interface OfflineStorageSchema {
+  version: number;
+  items: CartItem[];
+  pendingSyncQueue: SyncMutation[];
+  lastSyncedAt: number | null;
+}
+
+const STORAGE_KEY = "omnicart_offline_cache_v2";
+const CURRENT_SCHEMA_VERSION = 2;
+
+const INITIAL_STATE: OfflineStorageSchema = {
+  version: CURRENT_SCHEMA_VERSION,
+  items: [],
+  pendingSyncQueue: [],
+  lastSyncedAt: null,
+};
+
+function isValidSchema(data: unknown): data is OfflineStorageSchema {
+  if (typeof data !== "object" || data === null) {
+    return false;
+  }
+  const candidate = data as Partial<OfflineStorageSchema>;
+  return (
+    typeof candidate.version === "number" &&
+    Array.isArray(candidate.items) &&
+    Array.isArray(candidate.pendingSyncQueue)
+  );
 }
 
 export const OfflineStorage = {
+  getSnapshot(): OfflineStorageSchema {
+    try {
+      const rawData = localStorage.getItem(STORAGE_KEY);
+      if (!rawData) {
+        this.saveSnapshot(INITIAL_STATE);
+        return INITIAL_STATE;
+      }
+
+      const parsed = JSON.parse(rawData);
+      if (!isValidSchema(parsed)) {
+        console.warn("[OfflineStorage] Cache schema corrupted or outdated. Resetting to initial state.");
+        this.saveSnapshot(INITIAL_STATE);
+        return INITIAL_STATE;
+      }
+
+      return parsed;
+    } catch (error) {
+      console.error("[OfflineStorage] Failed to read localStorage:", error);
+      return INITIAL_STATE;
+    }
+  },
+
+  saveSnapshot(state: OfflineStorageSchema): boolean {
+    try {
+      const serialized = JSON.stringify(state);
+      localStorage.setItem(STORAGE_KEY, serialized);
+      return true;
+    } catch (error) {
+      console.error("[OfflineStorage] Failed to write localStorage:", error);
+      return false;
+    }
+  },
+
   getItems(): CartItem[] {
-    try {
-      const data = localStorage.getItem(STORAGE_KEY);
-      return data ? JSON.parse(data) : [];
-    } catch {
-      return [];
-    }
+    return this.getSnapshot().items;
   },
 
-  saveItems(items: CartItem[]): void {
-    try {
-      localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
-    } catch (e) {
-      console.warn("Local storage write error:", e);
-    }
+  saveItems(items: CartItem[]): boolean {
+    const state = this.getSnapshot();
+    state.items = items;
+    return this.saveSnapshot(state);
   },
 
-  queueMutation(mutation: PendingMutation): void {
-    try {
-      const q = this.getQueue();
-      q.push(mutation);
-      localStorage.setItem(QUEUE_KEY, JSON.stringify(q));
-    } catch (e) {
-      console.warn("Queue write error:", e);
+  upsertItem(item: CartItem): void {
+    const state = this.getSnapshot();
+    const existingIndex = state.items.findIndex((i) => i.id === item.id);
+    const updatedItem = { ...item, updated_at: Date.now() };
+
+    if (existingIndex >= 0) {
+      state.items[existingIndex] = updatedItem;
+    } else {
+      state.items.unshift(updatedItem);
     }
+
+    state.pendingSyncQueue.push({
+      action: existingIndex >= 0 ? "UPDATE" : "CREATE",
+      item: updatedItem,
+      clientTimestamp: Date.now(),
+    });
+
+    this.saveSnapshot(state);
   },
 
-  getQueue(): PendingMutation[] {
-    try {
-      const data = localStorage.getItem(QUEUE_KEY);
-      return data ? JSON.parse(data) : [];
-    } catch {
-      return [];
+  addItem(item: CartItem): CartItem[] {
+    this.upsertItem(item);
+    return this.getItems();
+  },
+
+  toggleCheck(itemId: string): boolean {
+    const state = this.getSnapshot();
+    const target = state.items.find((i) => i.id === itemId);
+    if (!target) {
+      return false;
     }
+
+    target.is_purchased = !target.is_purchased;
+    target.updated_at = Date.now();
+
+    state.pendingSyncQueue.push({
+      action: "UPDATE",
+      item: { ...target },
+      clientTimestamp: Date.now(),
+    });
+
+    return this.saveSnapshot(state);
+  },
+
+  toggleItem(itemId: string): CartItem[] {
+    this.toggleCheck(itemId);
+    return this.getItems();
+  },
+
+  deleteItem(itemId: string): void {
+    const state = this.getSnapshot();
+    const target = state.items.find((i) => i.id === itemId);
+
+    state.items = state.items.filter((i) => i.id !== itemId);
+
+    if (target) {
+      state.pendingSyncQueue.push({
+        action: "DELETE",
+        item: target,
+        clientTimestamp: Date.now(),
+      });
+    }
+
+    this.saveSnapshot(state);
+  },
+
+  removeItem(itemId: string): CartItem[] {
+    this.deleteItem(itemId);
+    return this.getItems();
+  },
+
+  getQueue(): SyncMutation[] {
+    return this.getSnapshot().pendingSyncQueue;
   },
 
   clearQueue(): void {
+    const state = this.getSnapshot();
+    state.pendingSyncQueue = [];
+    this.saveSnapshot(state);
+  },
+
+  flushSyncQueue(): SyncMutation[] {
+    const state = this.getSnapshot();
+    const queue = [...state.pendingSyncQueue];
+    state.pendingSyncQueue = [];
+    state.lastSyncedAt = Date.now();
+    this.saveSnapshot(state);
+    return queue;
+  },
+
+  clearAll(): void {
     try {
-      localStorage.removeItem(QUEUE_KEY);
-    } catch {}
-  },
-
-  // Optimistic offline toggle
-  toggleItem(id: string): CartItem[] {
-    const items = this.getItems();
-    const target = items.find((i) => i.id === id);
-    if (target) {
-      target.is_purchased = !target.is_purchased;
-      this.saveItems(items);
-      this.queueMutation({
-        type: "toggle",
-        itemId: id,
-        payload: { is_purchased: target.is_purchased },
-        timestamp: Date.now(),
-      });
+      localStorage.removeItem(STORAGE_KEY);
+    } catch (error) {
+      console.error("[OfflineStorage] Failed to clear storage:", error);
     }
-    return items;
-  },
-
-  // Optimistic offline add
-  addItem(item: CartItem): CartItem[] {
-    const items = [item, ...this.getItems()];
-    this.saveItems(items);
-    this.queueMutation({
-      type: "add",
-      payload: item,
-      timestamp: Date.now(),
-    });
-    return items;
-  },
-
-  // Optimistic offline remove
-  removeItem(id: string): CartItem[] {
-    const items = this.getItems().filter((i) => i.id !== id);
-    this.saveItems(items);
-    this.queueMutation({
-      type: "delete",
-      itemId: id,
-      timestamp: Date.now(),
-    });
-    return items;
   },
 };
+
+export const offlineStorage = OfflineStorage;
+export default OfflineStorage;

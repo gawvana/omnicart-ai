@@ -51,6 +51,15 @@ class Settings(BaseSettings):
     secret_key: str = Field(..., min_length=32)
     rate_limit_per_minute: int = 60
     cron_secret: str = ""
+    telegram_initdata_max_age_seconds: int = 86400
+
+    # ── Market & Pricing Configuration ────────────────────────
+    market_price_cache_ttl_seconds: int = 3600
+    market_estimate_lookback_days: int = 14
+
+    # ── HTTP Client Timeouts ──────────────────────────────────
+    http_client_timeout_seconds: float = 10.0
+    http_client_read_timeout_seconds: float = 60.0
 
     # ── App ───────────────────────────────────────────────────
     debug: bool = False

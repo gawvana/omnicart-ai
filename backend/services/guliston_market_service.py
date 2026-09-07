@@ -1,15 +1,30 @@
 """
 OmniCart AI — Guliston (Syrdarya) Local Market Analytics Service.
-Specialized price index and shopping recommendations for:
-- Guliston Dehqon Bozori (Central Bazaar)
-- Korzinka Guliston (Sayhun St.)
-- Yangi Bozor & neighborhood dukons
+Provides:
+- Statistical Market Price Estimator with IQR anomaly filtering & median computation
+- Crowdsourced and recorded price history persistence
+- Redis caching with 1-hour TTL
+- Basket split recommendation: Guliston Dehqon Bozori vs. Korzinka Guliston
+- Authentic Guliston Plov (Osh) ingredient cost calculator
 """
 
 from __future__ import annotations
 
-from typing import Any, Optional
+import json
+import logging
+import math
+from datetime import datetime, timedelta, timezone
+from decimal import Decimal
+from typing import Any, Dict, List, Optional, Sequence
 
+from pydantic import BaseModel, Field
+from sqlalchemy import desc, func, select
+from sqlalchemy.ext.asyncio import AsyncSession
+
+logger = logging.getLogger(__name__)
+
+
+# ── Static Market Knowledge Base (Fallback & Fast Reference) ─────────────────
 
 GULISTON_MARKET_INDEX: dict[str, dict[str, Any]] = {
     "говядина": {
@@ -186,12 +201,232 @@ GULISTON_MARKET_INDEX: dict[str, dict[str, Any]] = {
 }
 
 
+# ── DTOs ─────────────────────────────────────────────────────────────────────
+
+class PricePointDTO(BaseModel):
+    price: Decimal = Field(..., decimal_places=2, ge=Decimal("0.00"))
+    market_name: str = Field(..., min_length=1, max_length=128)
+    recorded_at: datetime
+
+
+class MarketPriceEstimate(BaseModel):
+    item_name: str
+    sample_size: int
+    min_price: Decimal
+    max_price: Decimal
+    average_price: Decimal
+    median_price: Decimal
+    recommended_retail_price: Decimal
+    currency: str = "UZS"
+    price_spread_percentage: Decimal
+    last_updated: datetime
+
+
+# ── Service ──────────────────────────────────────────────────────────────────
+
 class GulistonMarketService:
-    """Provides market intelligence, price comparison, and shopping optimization for Guliston."""
+    """
+    Market intelligence, price comparison, statistical anomaly filtering (IQR),
+    and shopping optimization for the city of Guliston.
+    """
+
+    def __init__(self, session: AsyncSession, redis: Any = None):
+        self._session = session
+        self._redis = redis
+
+    async def calculate_market_estimate(
+        self,
+        item_name: str,
+        lookback_days: int = 14,
+    ) -> Optional[MarketPriceEstimate]:
+        """
+        Calculates robust market price estimate using historical records.
+        Applies IQR (Interquartile Range) to eliminate outlier data points.
+        Caches results in Redis with 1-hour TTL.
+        """
+        if not item_name or not item_name.strip():
+            raise ValueError("Имя товара не может быть пустым.")
+
+        normalized_item_name = item_name.strip().lower()
+        cache_key = f"market:estimate:{normalized_item_name}:{lookback_days}"
+
+        # 1. Try Redis cache
+        if self._redis is not None:
+            try:
+                cached_data = await self._redis.get(cache_key)
+                if cached_data:
+                    return MarketPriceEstimate.model_validate_json(cached_data)
+            except Exception as exc:
+                logger.debug("Redis cache get error for %s: %s", cache_key, exc)
+
+        # 2. Query database for PriceHistory
+        threshold_date = datetime.now(timezone.utc) - timedelta(days=lookback_days)
+
+        from database.models import PriceHistory
+
+        query = (
+            select(PriceHistory.price, PriceHistory.market_name, PriceHistory.created_at)
+            .where(
+                func.lower(PriceHistory.item_name) == normalized_item_name,
+                PriceHistory.created_at >= threshold_date,
+            )
+            .order_by(PriceHistory.price.asc())
+        )
+
+        result = await self._session.execute(query)
+        rows: Sequence[Any] = result.all()
+
+        # Fallback to static catalog if no DB price history records exist yet
+        if not rows:
+            logger.info("Записи цен для товара '%s' не найдены в БД. Проверка базового каталога.", normalized_item_name)
+            static_info = self.find_product_info(item_name)
+            if static_info:
+                b_price = Decimal(str(static_info["bazaar_price"]))
+                s_price = Decimal(str(static_info["supermarket_price"]))
+                min_p = min(b_price, s_price)
+                max_p = max(b_price, s_price)
+                avg_p = ((b_price + s_price) / Decimal("2")).quantize(Decimal("0.01"))
+                spread = (((max_p - min_p) / min_p) * Decimal("100")).quantize(Decimal("0.01")) if min_p > 0 else Decimal("0.00")
+                rrp = (b_price * Decimal("1.05")).quantize(Decimal("0.01"))
+
+                estimate = MarketPriceEstimate(
+                    item_name=item_name.strip(),
+                    sample_size=2,
+                    min_price=min_p.quantize(Decimal("0.01")),
+                    max_price=max_p.quantize(Decimal("0.01")),
+                    average_price=avg_p,
+                    median_price=min_p.quantize(Decimal("0.01")),
+                    recommended_retail_price=rrp,
+                    currency="UZS",
+                    price_spread_percentage=spread,
+                    last_updated=datetime.now(timezone.utc),
+                )
+                return estimate
+            return None
+
+        prices: List[Decimal] = [Decimal(str(row[0])) for row in rows]
+        clean_prices = self._remove_outliers_iqr(prices)
+
+        if not clean_prices:
+            clean_prices = prices
+
+        sample_size = len(clean_prices)
+        min_p = clean_prices[0]
+        max_p = clean_prices[-1]
+        avg_p = sum(clean_prices) / Decimal(sample_size)
+        median_p = self._calculate_median(clean_prices)
+        rrp = (median_p * Decimal("1.05")).quantize(Decimal("0.01"))
+
+        if min_p > Decimal("0"):
+            spread = (((max_p - min_p) / min_p) * Decimal("100")).quantize(Decimal("0.01"))
+        else:
+            spread = Decimal("0.00")
+
+        latest_query = (
+            select(PriceHistory.created_at)
+            .where(func.lower(PriceHistory.item_name) == normalized_item_name)
+            .order_by(desc(PriceHistory.created_at))
+            .limit(1)
+        )
+        latest_res = await self._session.execute(latest_query)
+        latest_timestamp = latest_res.scalar() or datetime.now(timezone.utc)
+
+        estimate = MarketPriceEstimate(
+            item_name=item_name.strip(),
+            sample_size=sample_size,
+            min_price=min_p.quantize(Decimal("0.01")),
+            max_price=max_p.quantize(Decimal("0.01")),
+            average_price=avg_p.quantize(Decimal("0.01")),
+            median_price=median_p.quantize(Decimal("0.01")),
+            recommended_retail_price=rrp,
+            currency="UZS",
+            price_spread_percentage=spread,
+            last_updated=latest_timestamp,
+        )
+
+        # 3. Cache result in Redis (TTL 3600 seconds = 1 hour)
+        if self._redis is not None:
+            try:
+                await self._redis.set(
+                    cache_key,
+                    estimate.model_dump_json(),
+                    ex=3600,
+                )
+            except Exception as exc:
+                logger.debug("Redis cache set error for %s: %s", cache_key, exc)
+
+        return estimate
+
+    @staticmethod
+    def _remove_outliers_iqr(sorted_prices: List[Decimal]) -> List[Decimal]:
+        """Interquartile range (IQR) anomaly filter for skewed pricing reports."""
+        n = len(sorted_prices)
+        if n < 4:
+            return sorted_prices
+
+        q1_index = int(math.floor(n * 0.25))
+        q3_index = int(math.floor(n * 0.75))
+
+        q1 = sorted_prices[q1_index]
+        q3 = sorted_prices[q3_index]
+        iqr = q3 - q1
+
+        lower_bound = q1 - (Decimal("1.5") * iqr)
+        upper_bound = q3 + (Decimal("1.5") * iqr)
+
+        filtered = [p for p in sorted_prices if lower_bound <= p <= upper_bound]
+        return filtered if filtered else sorted_prices
+
+    @staticmethod
+    def _calculate_median(sorted_prices: List[Decimal]) -> Decimal:
+        """Calculates exact median of a sorted list of decimal prices."""
+        n = len(sorted_prices)
+        mid = n // 2
+        if n % 2 == 1:
+            return sorted_prices[mid]
+        return ((sorted_prices[mid - 1] + sorted_prices[mid]) / Decimal("2")).quantize(Decimal("0.01"))
+
+    async def record_price(
+        self,
+        item_name: str,
+        price: Decimal,
+        market_name: str,
+        reporter_id: Optional[int] = None,
+    ) -> None:
+        """Records a new observed price in the database and invalidates item cache."""
+        if price <= Decimal("0"):
+            raise ValueError("Цена должна быть строго положительным числом.")
+
+        from database.models import PriceHistory
+
+        entry = PriceHistory(
+            item_name=item_name.strip().lower(),
+            price=price,
+            market_name=market_name.strip(),
+            reporter_id=reporter_id,
+            created_at=datetime.now(timezone.utc),
+        )
+        self._session.add(entry)
+        await self._session.commit()
+        logger.info(
+            "Зафиксирована цена: товар='%s', цена=%s, рынок='%s', пользователь=%s",
+            item_name, price, market_name, reporter_id,
+        )
+
+        # Invalidate cached estimate
+        if self._redis is not None:
+            try:
+                normalized = item_name.strip().lower()
+                pattern = f"market:estimate:{normalized}:*"
+                keys = await self._redis.keys(pattern)
+                if keys:
+                    await self._redis.delete(*keys)
+            except Exception as exc:
+                logger.debug("Error invalidating cache for %s: %s", item_name, exc)
 
     @staticmethod
     def find_product_info(item_name: str) -> Optional[dict[str, Any]]:
-        """Look up known price data for a product in Guliston."""
+        """Look up known price data for a product in Guliston static catalog."""
         query = item_name.strip().lower()
         for key, data in GULISTON_MARKET_INDEX.items():
             if key in query or query in key:

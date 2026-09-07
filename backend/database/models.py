@@ -14,6 +14,7 @@ from decimal import Decimal
 from typing import Optional
 
 from sqlalchemy import (
+    BigInteger,
     Boolean,
     CheckConstraint,
     DateTime,
@@ -204,6 +205,8 @@ class PurchaseHistory(Base):
     __tablename__ = "purchase_history"
     __table_args__ = (
         Index("ix_purchase_user_date", "user_id", "purchased_at"),
+        Index("ix_purchase_item_created", "item_name", "created_at"),
+        Index("ix_purchase_product_created", "product_id", "created_at"),
         CheckConstraint("quantity > 0", name="ck_positive_quantity"),
         CheckConstraint("price_paid >= 0", name="ck_nonneg_price"),
     )
@@ -340,3 +343,29 @@ class LocalPriceIndex(Base):
     )
 
     product: Mapped["Product"] = relationship(back_populates="price_indices")
+
+
+class PriceHistory(Base):
+    """
+    Crowdsourced and monitored price logs for Guliston and local markets.
+    Used by Market Price Estimator for IQR outlier filtering, median calculations, and price trends.
+    """
+
+    __tablename__ = "price_history"
+    __table_args__ = (
+        Index("ix_price_history_item_created", "item_name", "created_at"),
+        Index("ix_price_history_market_created", "market_name", "created_at"),
+        CheckConstraint("price > 0", name="ck_price_history_positive_price"),
+    )
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    item_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
+    price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
+    market_name: Mapped[str] = mapped_column(String(128), nullable=False)
+    reporter_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow, server_default=func.now(), index=True
+    )
+

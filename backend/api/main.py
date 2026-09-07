@@ -10,6 +10,7 @@ Security layers:
 
 from __future__ import annotations
 
+import asyncio
 import hashlib
 import hmac
 import json
@@ -31,7 +32,7 @@ from fastapi import BackgroundTasks, Depends, FastAPI, Header, HTTPException, Qu
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from pydantic import BaseModel, Field
-from sqlalchemy import select
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 from sqlalchemy.pool import NullPool
 
@@ -41,9 +42,16 @@ from aiogram.enums import ParseMode
 from aiogram.types import Update
 
 from core.config import get_settings
+from core.security import (
+    SecurityValidationError,
+    TelegramSecurityValidator,
+    TelegramUser,
+    ValidatedInitData,
+)
 from database.models import (
     Base,
     LocalPriceIndex,
+    PriceHistory,
     PurchaseHistory,
     User,
     UserSettings,
@@ -51,6 +59,7 @@ from database.models import (
 )
 from services.b_ai_client import BAIClient, BAIClientError
 from services.cron_parser import PriceCronService
+from services.guliston_market_service import GulistonMarketService, MarketPriceEstimate
 from services.universal_ai_parser import UniversalAIParser
 
 logger = logging.getLogger(__name__)
@@ -64,6 +73,15 @@ _redis: aioredis.Redis | None = None
 _bai_client: BAIClient | None = None
 _bot: Bot | None = None
 _dp: Dispatcher | None = None
+_background_tasks: set[asyncio.Task[Any]] = set()
+
+
+def track_task(coro: Any) -> asyncio.Task[Any]:
+    """Keeps a strong reference to background tasks to prevent GC dropping."""
+    task = asyncio.create_task(coro)
+    _background_tasks.add(task)
+    task.add_done_callback(_background_tasks.discard)
+    return task
 
 
 async def _init_resources() -> None:
@@ -114,7 +132,12 @@ async def _init_resources() -> None:
     if _bai_client is None and settings.bai_api_key:
         _bai_client = BAIClient(settings)
         _bai_client._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0),
+            timeout=httpx.Timeout(
+                connect=settings.http_client_timeout_seconds,
+                read=settings.http_client_read_timeout_seconds,
+                write=settings.http_client_timeout_seconds,
+                pool=settings.http_client_timeout_seconds,
+            ),
             limits=httpx.Limits(max_connections=50, max_keepalive_connections=10),
         )
 
@@ -142,8 +165,36 @@ def get_bot_dispatcher() -> tuple[Bot, Dispatcher]:
 @asynccontextmanager
 async def lifespan(app: FastAPI) -> AsyncGenerator[None, None]:
     await _init_resources()
+    settings = get_settings()
+
+    # Automatically configure Telegram Webhook during lifespan startup if token & url configured
+    if settings.telegram_bot_token and settings.telegram_webapp_url:
+        try:
+            webhook_url = f"{settings.telegram_webapp_url.rstrip('/')}/api/webhook"
+            secret = settings.telegram_webhook_secret or None
+            async with Bot(
+                token=settings.telegram_bot_token,
+                default=DefaultBotProperties(parse_mode=ParseMode.HTML),
+            ) as b:
+                await b.set_webhook(
+                    url=webhook_url,
+                    secret_token=secret,
+                    allowed_updates=["message", "callback_query"],
+                    drop_pending_updates=True,
+                )
+                logger.info("Lifespan: Telegram webhook configured for %s", webhook_url)
+        except Exception as exc:
+            logger.warning("Lifespan: Could not automatically configure Telegram webhook: %s", exc)
+
     logger.info("OmniCart AI API started — DB, Redis, B.AI ready")
     yield
+
+    # Cancel pending background tasks gracefully
+    if _background_tasks:
+        for t in list(_background_tasks):
+            if not t.done():
+                t.cancel()
+        await asyncio.gather(*_background_tasks, return_exceptions=True)
 
     if _bai_client and _bai_client._client:
         await _bai_client._client.aclose()
@@ -182,84 +233,26 @@ app.add_middleware(
 )
 
 
-# ── Telegram initData Verification ──────────────────────────────────────────
-
-
-class TelegramUser(BaseModel):
-    """Decoded Telegram user from initData."""
-
-    id: int
-    first_name: str = ""
-    last_name: str = ""
-    username: str = ""
-    language_code: str = "en"
+# ── Telegram initData Verification (via core.security) ──────────────────────
 
 
 def verify_telegram_init_data(init_data: str, bot_token: str) -> TelegramUser:
     """
     Cryptographically verify Telegram WebApp initData using HMAC-SHA256.
-
-    Algorithm (per Telegram docs):
-    1. Parse the query string into key=value pairs.
-    2. Remove the `hash` parameter and sort remaining pairs alphabetically.
-    3. Build a data-check-string by joining with newlines.
-    4. Compute HMAC-SHA256(secret_key, data_check_string) where
-       secret_key = HMAC-SHA256("WebAppData", bot_token).
-    5. Compare the computed hash with the received hash.
+    Uses TelegramSecurityValidator for replay protection and timestamp integrity.
     """
-    parsed = parse_qs(init_data, keep_blank_values=True)
-
-    received_hash = parsed.pop("hash", [None])[0]
-    if not received_hash:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing hash in initData",
-        )
-
-    # Sort key=value pairs alphabetically and build check string
-    data_check_pairs: list[str] = []
-    for key in sorted(parsed.keys()):
-        values = parsed[key]
-        value = values[0] if values else ""
-        data_check_pairs.append(f"{key}={value}")
-
-    data_check_string = "\n".join(data_check_pairs)
-
-    # Compute secret key: HMAC-SHA256("WebAppData", bot_token)
-    secret_key = hmac.new(
-        key=b"WebAppData",
-        msg=bot_token.encode("utf-8"),
-        digestmod=hashlib.sha256,
-    ).digest()
-
-    # Compute expected hash: HMAC-SHA256(secret_key, data_check_string)
-    computed_hash = hmac.new(
-        key=secret_key,
-        msg=data_check_string.encode("utf-8"),
-        digestmod=hashlib.sha256,
-    ).hexdigest()
-
-    if not hmac.compare_digest(computed_hash, received_hash):
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Invalid initData signature",
-        )
-
-    # Extract user object
-    user_raw = parsed.get("user", [None])[0]
-    if not user_raw:
-        raise HTTPException(
-            status_code=status.HTTP_401_UNAUTHORIZED,
-            detail="Missing user in initData",
-        )
-
+    settings = get_settings()
+    validator = TelegramSecurityValidator(
+        bot_token,
+        max_auth_age_seconds=settings.telegram_initdata_max_age_seconds,
+    )
     try:
-        user_data = json.loads(unquote(user_raw))
-        return TelegramUser(**user_data)
-    except (json.JSONDecodeError, TypeError, KeyError) as exc:
+        validated: ValidatedInitData = validator.validate_init_data(init_data)
+        return validated.user
+    except SecurityValidationError as exc:
         raise HTTPException(
             status_code=status.HTTP_401_UNAUTHORIZED,
-            detail=f"Invalid user data in initData: {exc}",
+            detail=exc.message,
         ) from exc
 
 
@@ -614,6 +607,7 @@ async def toggle_purchased(
     db: DBSession,
 ) -> dict[str, Any]:
     user = await get_or_create_user(tg_user, db)
+    cart_id = user.family_cart_id if user.family_cart_id else user.id
 
     try:
         uid = uuid.UUID(item_id)
@@ -623,7 +617,7 @@ async def toggle_purchased(
     result = await db.execute(
         select(PurchaseHistory).where(
             PurchaseHistory.id == uid,
-            PurchaseHistory.user_id == user.id,
+            PurchaseHistory.user_id.in_([user.id, cart_id]),
         )
     )
     item = result.scalar_one_or_none()
@@ -645,6 +639,7 @@ async def delete_checklist_item(
     db: DBSession,
 ) -> None:
     user = await get_or_create_user(tg_user, db)
+    cart_id = user.family_cart_id if user.family_cart_id else user.id
 
     try:
         uid = uuid.UUID(item_id)
@@ -654,7 +649,7 @@ async def delete_checklist_item(
     result = await db.execute(
         select(PurchaseHistory).where(
             PurchaseHistory.id == uid,
-            PurchaseHistory.user_id == user.id,
+            PurchaseHistory.user_id.in_([user.id, cart_id]),
         )
     )
     item = result.scalar_one_or_none()
@@ -663,6 +658,25 @@ async def delete_checklist_item(
 
     await db.delete(item)
     await db.commit()
+
+
+@app.post("/api/v1/checklist/clear-purchased", tags=["Checklist"])
+async def clear_purchased_checklist_items(
+    tg_user: AuthUser,
+    db: DBSession,
+) -> dict[str, Any]:
+    """Purges all purchased items from user or shared family cart."""
+    user = await get_or_create_user(tg_user, db)
+    cart_id = user.family_cart_id if user.family_cart_id else user.id
+
+    result = await db.execute(
+        delete(PurchaseHistory).where(
+            PurchaseHistory.user_id.in_([user.id, cart_id]),
+            PurchaseHistory.is_purchased == True,  # noqa: E712
+        )
+    )
+    await db.commit()
+    return {"status": "cleared", "deleted_count": result.rowcount or 0}
 
 
 # ── AI: Parse Purchase Text ──────────────────────────────────────────────────
@@ -867,24 +881,24 @@ async def _process_telegram_update(body: dict[str, Any]) -> None:
 @app.post("/webhook")
 async def telegram_webhook(
     request: Request,
-    background_tasks: BackgroundTasks,
     secret_token: Annotated[Optional[str], Header(alias="X-Telegram-Bot-Api-Secret-Token")] = None,
 ) -> dict[str, Any]:
     """
     Lightning-fast Telegram Bot Webhook endpoint.
-    Instantly responds {"ok": True} (<50ms) to prevent timeouts and duplicate retry loops.
-    Heavy processing is handed off to background tasks.
+    Strictly verifies secret token via hmac.compare_digest.
+    Processes updates in tracked background task to prevent task GC drops.
     """
     settings = get_settings()
-    if settings.telegram_webhook_secret and secret_token != settings.telegram_webhook_secret:
-        raise HTTPException(status_code=403, detail="Invalid webhook secret token")
+    if settings.telegram_webhook_secret:
+        if not secret_token or not hmac.compare_digest(secret_token, settings.telegram_webhook_secret):
+            raise HTTPException(status_code=403, detail="Invalid webhook secret token")
 
     try:
         body = await request.json()
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}")
 
-    background_tasks.add_task(_process_telegram_update, body)
+    track_task(_process_telegram_update(body))
     return {"ok": True}
 
 
@@ -1031,7 +1045,20 @@ async def cron_trigger(
     }
 
 
-# ── Fast Market Autocomplete & Crowdsourcing ─────────────────────────────────
+@app.get("/api/v1/market/estimate", tags=["Guliston Market"])
+async def get_market_price_estimate(
+    db: DBSession,
+    r: Annotated[Optional[aioredis.Redis], Depends(get_redis_client)],
+    item_name: str = Query(..., min_length=1, max_length=100),
+    lookback_days: int = Query(14, ge=1, le=90),
+) -> dict[str, Any]:
+    """Calculates statistical price estimate (IQR outlier removal, median, RRP) for a product in Guliston."""
+    service = GulistonMarketService(session=db, redis=r)
+    estimate = await service.calculate_market_estimate(item_name, lookback_days=lookback_days)
+    if estimate is None:
+        raise HTTPException(status_code=404, detail=f"No price estimates available for '{item_name}'")
+    return estimate.model_dump(mode="json")
+
 
 @app.get("/api/v1/market/autocomplete", tags=["Guliston Market"])
 async def market_autocomplete(
@@ -1046,16 +1073,33 @@ async def market_autocomplete(
 class ReportPriceBody(BaseModel):
     item_name: str = Field(..., min_length=1, max_length=100)
     price: float = Field(..., gt=0)
+    market_name: str = Field(default="Гулистон Деҳқон Бозори", max_length=128)
 
 
 @app.post("/api/v1/market/report-price", tags=["Guliston Market"])
 async def report_market_price(
     body: ReportPriceBody,
+    db: DBSession,
+    tg_user: AuthUser,
 ) -> dict[str, Any]:
-    """Crowdsourcing: user reports actual price at Guliston bazaar."""
+    """Crowdsourcing: user reports actual price at Guliston bazaar. Saves to DB and Redis."""
     redis = await get_redis()
     await PriceCronService.update_user_price(body.item_name, body.price, redis)
-    return {"status": "success", "item": body.item_name, "price": body.price}
+
+    # Persist to database PriceHistory table
+    service = GulistonMarketService(session=db, redis=redis)
+    await service.record_price(
+        item_name=body.item_name,
+        price=Decimal(str(body.price)),
+        market_name=body.market_name,
+        reporter_id=tg_user.id if tg_user else None,
+    )
+    return {
+        "status": "success",
+        "item": body.item_name,
+        "price": body.price,
+        "market_name": body.market_name,
+    }
 
 
 @app.get("/api/cron/sync-prices")

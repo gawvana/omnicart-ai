@@ -28,7 +28,7 @@ export const DynamicIsland: React.FC<DynamicIslandProps> = ({
   }, [notification, onDismiss]);
 
   return (
-    <div className="fixed top-2.5 left-0 right-0 z-50 flex justify-center pointer-events-none px-4">
+    <div className="fixed top-[max(0.625rem,env(safe-area-inset-top))] left-0 right-0 z-50 flex justify-center pointer-events-none px-4">
       <AnimatePresence>
         {notification ? (
           <motion.div
