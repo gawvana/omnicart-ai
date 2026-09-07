@@ -174,8 +174,8 @@ class BAIClient:
 
     async def __aenter__(self) -> "BAIClient":
         self._client = httpx.AsyncClient(
-            timeout=httpx.Timeout(connect=10.0, read=60.0, write=10.0, pool=10.0),
-            limits=httpx.Limits(max_connections=100, max_keepalive_connections=20),
+            timeout=httpx.Timeout(connect=3.0, read=4.0, write=3.0, pool=3.0),
+            limits=httpx.Limits(max_connections=20, max_keepalive_connections=5),
         )
         return self
 
@@ -191,8 +191,8 @@ class BAIClient:
 
     @retry(
         retry=retry_if_exception_type((httpx.TransportError, httpx.TimeoutException)),
-        wait=wait_exponential_jitter(initial=1, max=30, jitter=5),
-        stop=stop_after_attempt(4),
+        wait=wait_exponential_jitter(initial=0.5, max=1.5, jitter=0.2),
+        stop=stop_after_attempt(2),
         reraise=True,
     )
     async def _chat_completion(

@@ -180,34 +180,52 @@ class UniversalAIParser:
     @classmethod
     def _fallback_parse(cls, text: str) -> UniversalParseResult:
         """Instant heuristic fallback parser without external API calls."""
-        lines = [l.strip() for l in text.splitlines() if l.strip()]
-        if not lines:
-            lines = [t.strip() for t in text.split(",") if t.strip()]
+        raw_lines = [l.strip() for l in text.splitlines() if l.strip()]
+        lines: list[str] = []
+        for rl in raw_lines:
+            # Split comma-separated items if present e.g. "картошка 2кг, мясо 1кг"
+            if "," in rl or ";" in rl:
+                parts = [p.strip() for p in re.split(r"[,;]+", rl) if p.strip()]
+                lines.extend(parts)
+            else:
+                lines.append(rl)
 
         items: list[ParsedItem] = []
-        for line in lines[:30]:
+        for line in lines[:50]:
             cleaned = re.sub(r"^[-*•\d\.\)\[\]xX\s]+", "", line).strip()
             if not cleaned or len(cleaned) < 2:
                 continue
 
-            # Extract price if present
+            # 1. Extract price if present (e.g. "50000 сум", "50 000 uzs", or trailing number >= 500)
             price = 0.0
-            price_match = re.search(r"(\d+[\d\s]*)\s*(?:сум|sum|uzs)", cleaned, re.IGNORECASE)
+            price_match = re.search(r"(\d+[\d\s]*)\s*(?:сум|sum|uzs)\b", cleaned, re.IGNORECASE)
+            if not price_match:
+                price_match = re.search(r"\s+(\d{3,}(?:[\s\d]*))\s*$", cleaned)
             if price_match:
                 try:
                     price = float(price_match.group(1).replace(" ", ""))
                 except ValueError:
                     pass
-                cleaned = cleaned[:price_match.start()].strip()
+                cleaned = (cleaned[:price_match.start()] + " " + cleaned[price_match.end():]).strip()
 
-            # Extract qty and unit
+            # 2. Extract qty and unit
             qty = 1.0
-            unit = "кг"
-            qty_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(кг|г|л|литр|шт|пачк\w*|буханк\w*)", cleaned, re.IGNORECASE)
+            unit = "шт"
+            qty_match = re.search(r"(\d+(?:[.,]\d+)?)\s*(кг|г|л|литр|шт|пачк\w*|буханк\w*|упак\w*)", cleaned, re.IGNORECASE)
             if qty_match:
                 try:
                     qty = float(qty_match.group(1).replace(",", "."))
-                    unit = qty_match.group(2).lower()
+                    raw_u = qty_match.group(2).lower()
+                    if raw_u.startswith("кг"):
+                        unit = "кг"
+                    elif raw_u.startswith("г"):
+                        unit = "г"
+                    elif raw_u.startswith("л"):
+                        unit = "л"
+                    elif raw_u.startswith("пачк") or raw_u.startswith("упак"):
+                        unit = "упак"
+                    else:
+                        unit = "шт"
                 except ValueError:
                     pass
                 cleaned = (cleaned[:qty_match.start()] + " " + cleaned[qty_match.end():]).strip()

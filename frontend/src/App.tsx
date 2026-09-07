@@ -4,7 +4,7 @@
  */
 
 import React, { useEffect, useRef, useCallback } from "react";
-import { WifiOff, Users } from "lucide-react";
+import { WifiOff, Users, ShoppingCart, Receipt } from "lucide-react";
 
 import { useChecklist } from "./hooks/useChecklist";
 import { initTelegram, applyThemeColors, onThemeChange, getUserId } from "./services/telegram";
@@ -64,8 +64,10 @@ export const App: React.FC = () => {
       {/* Header */}
       <header className="app-header">
         <div className="app-header-left">
-          <h1 className="app-title">
-            <span className="app-title-emoji">🛒</span>
+          <h1 className="app-title flex items-center gap-2.5">
+            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 p-0.5 shadow-md shadow-emerald-500/20 flex items-center justify-center shrink-0">
+              <ShoppingCart className="w-4 h-4 text-white stroke-[2.5]" />
+            </div>
             <span>Покупки</span>
             {pendingCount > 0 && (
               <span className="app-title-count">{pendingCount}</span>
@@ -140,8 +142,9 @@ export const App: React.FC = () => {
       {totalItems > 0 && (
         <div className="total-bar">
           <div className="total-bar-inner">
-            <span className="total-label">
-              <span className="total-icon">🧾</span> Итого {pendingCount > 0 ? `(${pendingCount} из ${totalItems})` : `(${totalItems})`}
+            <span className="total-label flex items-center gap-1.5">
+              <Receipt className="w-4 h-4 text-emerald-400" />
+              <span>Итого {pendingCount > 0 ? `(${pendingCount} из ${totalItems})` : `(${totalItems})`}</span>
             </span>
             <span className="total-value">
               {totalCost.toLocaleString("ru-RU")}

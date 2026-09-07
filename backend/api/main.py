@@ -632,12 +632,12 @@ async def toggle_purchased(
     return {"id": str(item.id), "is_purchased": item.is_purchased}
 
 
-@app.delete("/api/v1/checklist/{item_id}", tags=["Checklist"], status_code=204)
+@app.delete("/api/v1/checklist/{item_id}", tags=["Checklist"], status_code=200)
 async def delete_checklist_item(
     item_id: str,
     tg_user: AuthUser,
     db: DBSession,
-) -> None:
+) -> dict[str, Any]:
     user = await get_or_create_user(tg_user, db)
     cart_id = user.family_cart_id if user.family_cart_id else user.id
 
@@ -658,6 +658,7 @@ async def delete_checklist_item(
 
     await db.delete(item)
     await db.commit()
+    return {"status": "deleted", "id": item_id}
 
 
 @app.post("/api/v1/checklist/clear-purchased", tags=["Checklist"])
@@ -847,6 +848,7 @@ async def health_check() -> dict[str, Any]:
 
 
 @app.get("/api/webhook")
+@app.get("/api/webhook.py")
 @app.get("/webhook")
 async def telegram_webhook_info() -> dict[str, str]:
     return {"status": "ok", "message": "OmniCart AI Telegram Webhook is active and waiting for POST updates"}
@@ -898,7 +900,12 @@ async def telegram_webhook(
     except Exception as exc:
         raise HTTPException(status_code=400, detail=f"Invalid JSON payload: {exc}")
 
-    track_task(_process_telegram_update(body))
+    # Direct await so Vercel Serverless doesn't terminate before bot sends reply
+    try:
+        await _process_telegram_update(body)
+    except Exception as exc:
+        logger.exception("Error executing Telegram update: %s", exc)
+
     return {"ok": True}
 
 

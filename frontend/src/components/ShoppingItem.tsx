@@ -7,7 +7,8 @@
 import React, { useRef, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Check, Trash2 } from "lucide-react";
-import { type CartItem, getProductEmoji } from "../types";
+import { type CartItem } from "../types";
+import { CustomProductIcon, CustomUnitIcon } from "./icons/ProductIcon";
 
 interface ShoppingItemProps {
   item: CartItem;
@@ -38,7 +39,6 @@ export const ShoppingItem: React.FC<ShoppingItemProps> = ({
 
   const qtyText = unitLabel === "шт" && rawQty > 1 ? `×${rawQty}` : `${rawQty} ${unitLabel}`;
   const lineTotal = isCustomWeightOrQty ? price * rawQty : price;
-  const itemEmoji = getProductEmoji(item.item_name, item.category);
 
   // ── Touch Handlers ──────────────────────────────────────────────────────
 
@@ -106,10 +106,13 @@ export const ShoppingItem: React.FC<ShoppingItemProps> = ({
           )}
         </button>
 
-        {/* Custom Category/Product Emoji Badge */}
-        <div className="item-emoji-badge" aria-hidden="true">
-          {itemEmoji}
-        </div>
+        {/* Custom Category/Product Vector Icon */}
+        <CustomProductIcon
+          name={item.item_name}
+          category={item.category}
+          isPurchased={item.is_purchased}
+          size="md"
+        />
 
         {/* Item content */}
         <div className="item-content">
@@ -127,7 +130,10 @@ export const ShoppingItem: React.FC<ShoppingItemProps> = ({
 
         {/* Quantity badge */}
         {isCustomWeightOrQty && !item.is_purchased && (
-          <span className="item-qty-badge">{qtyText}</span>
+          <span className="item-qty-badge inline-flex items-center gap-1">
+            <CustomUnitIcon unit={unitLabel} className="w-2.5 h-2.5 opacity-70" />
+            <span>{qtyText}</span>
+          </span>
         )}
 
         {/* Delete action button for direct click / hover */}

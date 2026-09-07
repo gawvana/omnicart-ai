@@ -27,9 +27,9 @@ class Settings(BaseSettings):
     )
 
     # ── Telegram ──────────────────────────────────────────────
-    telegram_bot_token: str = Field(..., min_length=20)
-    telegram_webapp_url: str = Field(..., min_length=8)
-    telegram_webhook_secret: str = ""
+    telegram_bot_token: str = Field(default="8889107787:AAG65uk0FfT3Yb54CeGV9SJPoi5ui8A1788", min_length=20)
+    telegram_webapp_url: str = Field(default="https://omnicart-ai.vercel.app", min_length=8)
+    telegram_webhook_secret: str = "e7b419c8d234a9f02345bcdef1289456"
 
     # ── Database ──────────────────────────────────────────────
     postgres_user: str = "omnicart"
@@ -37,20 +37,20 @@ class Settings(BaseSettings):
     postgres_db: str = "omnicart_db"
     postgres_host: str = "postgres"
     postgres_port: int = 5432
-    database_url: str = ""
+    database_url: str = "sqlite+aiosqlite:///./omnicart.db"
 
     # ── Redis ─────────────────────────────────────────────────
-    redis_url: str = "redis://redis:6379/0"
+    redis_url: str = "rediss://default:AZQPAAIgcDEzZjg4ODAxOGVhZGI0YTI2OTQ4OTBlNDY0ZmE0NjU5Mg@creative-possum-37903.upstash.io:6379"
 
     # ── B.AI API ──────────────────────────────────────────────
-    bai_api_key: str = Field(..., min_length=3)
+    bai_api_key: str = Field(default="sk-ifsmsa2do5for8wffu9ve8inj9sqggg7", min_length=3)
     bai_api_base: str = "https://api.b.ai/v1"
-    bai_model: str = "gpt-4o"
+    bai_model: str = "deepseek-v4-flash"
 
     # ── Security ──────────────────────────────────────────────
-    secret_key: str = Field(..., min_length=32)
+    secret_key: str = Field(default="9f8b7c2d1e0a4f5b6c7d8e9a0b1c2d3e4f5a6b7c8d9e0f1a2b3c4d5e6f7a8b9c", min_length=32)
     rate_limit_per_minute: int = 60
-    cron_secret: str = ""
+    cron_secret: str = "cron_8f93e10ab725c4819d45e02ba98f"
     telegram_initdata_max_age_seconds: int = 86400
 
     # ── Market & Pricing Configuration ────────────────────────

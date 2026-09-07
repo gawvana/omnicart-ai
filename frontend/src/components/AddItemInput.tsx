@@ -5,8 +5,9 @@
 
 import React, { useState, useRef, useCallback } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { Plus, ChevronDown } from "lucide-react";
+import { Plus, ChevronDown, Coins, Scale } from "lucide-react";
 import { UNITS, type UnitType } from "../types";
+import { CustomUnitIcon } from "./icons/ProductIcon";
 
 interface AddItemInputProps {
   onAdd: (name: string, opts?: { price?: number; quantity?: number; unit?: string; hasCustomQuantity?: boolean }) => void;
@@ -180,7 +181,10 @@ export const AddItemInput: React.FC<AddItemInputProps> = ({ onAdd, inputRef: ext
           >
             <div className="add-input-advanced-grid">
               <div className="add-input-field-group">
-                <label className="add-input-label">💰 Цена (сум)</label>
+                <label className="add-input-label flex items-center gap-1.5">
+                  <Coins className="w-3.5 h-3.5 text-amber-400" />
+                  <span>Цена (сум)</span>
+                </label>
                 <input
                   type="number"
                   value={price}
@@ -192,7 +196,10 @@ export const AddItemInput: React.FC<AddItemInputProps> = ({ onAdd, inputRef: ext
                 />
               </div>
               <div className="add-input-field-group">
-                <label className="add-input-label">⚖️ Вес / Кол-во</label>
+                <label className="add-input-label flex items-center gap-1.5">
+                  <Scale className="w-3.5 h-3.5 text-emerald-400" />
+                  <span>Вес / Кол-во</span>
+                </label>
                 <input
                   type="number"
                   value={quantity}
@@ -214,7 +221,7 @@ export const AddItemInput: React.FC<AddItemInputProps> = ({ onAdd, inputRef: ext
                   onClick={() => setUnit(u.value)}
                   className={`add-input-unit-btn ${unit === u.value ? "active" : ""}`}
                 >
-                  <span className="unit-icon">{u.icon}</span>
+                  <CustomUnitIcon unit={u.value} className="w-3.5 h-3.5" />
                   <span>{u.label}</span>
                 </button>
               ))}

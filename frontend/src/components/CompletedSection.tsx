@@ -6,7 +6,7 @@
 
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
-import { ChevronRight, Check } from "lucide-react";
+import { ChevronRight, CheckCircle2, Trash2 } from "lucide-react";
 import ShoppingItem from "./ShoppingItem";
 import type { CartItem } from "../types";
 
@@ -40,8 +40,8 @@ export const CompletedSection: React.FC<CompletedSectionProps> = ({
           <ChevronRight
             className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "rotate-90" : ""}`}
           />
-          <Check className="w-3.5 h-3.5 text-emerald-500" />
-          <span>✨ Куплено</span>
+          <CheckCircle2 className="w-3.5 h-3.5 text-emerald-400" />
+          <span>Куплено</span>
           <span className="completed-count">{items.length}</span>
         </div>
       </button>
@@ -69,9 +69,10 @@ export const CompletedSection: React.FC<CompletedSectionProps> = ({
             <button
               type="button"
               onClick={onClear}
-              className="completed-clear-btn"
+              className="completed-clear-btn inline-flex items-center justify-center gap-1.5"
             >
-              🗑️ Очистить купленное
+              <Trash2 className="w-3.5 h-3.5 text-rose-400" />
+              <span>Очистить купленное</span>
             </button>
           </motion.div>
         )}
