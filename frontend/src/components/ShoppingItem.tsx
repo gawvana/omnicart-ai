@@ -7,7 +7,7 @@
 import React, { useRef, useState, useCallback } from "react";
 import { motion } from "framer-motion";
 import { Check, Trash2 } from "lucide-react";
-import type { CartItem } from "../types";
+import { type CartItem, getProductEmoji } from "../types";
 
 interface ShoppingItemProps {
   item: CartItem;
@@ -27,12 +27,18 @@ export const ShoppingItem: React.FC<ShoppingItemProps> = ({
   const startX = useRef(0);
   const currentX = useRef(0);
 
-  const qty = parseFloat(item.quantity) || 1;
+  const rawQty = parseFloat(item.quantity) || 1;
   const price = parseFloat(item.price_paid) || 0;
   const unitLabel = item.unit || "шт";
-  const hasCustomQty = qty !== 1 || (item.unit && item.unit !== "шт");
-  const qtyText = unitLabel === "шт" && qty > 1 ? `×${qty}` : `${qty} ${unitLabel}`;
-  const lineTotal = price * qty;
+
+  // When weight was not explicitly set by the user, do NOT display "1" or "1 кг"
+  const isCustomWeightOrQty = item.has_custom_quantity !== undefined
+    ? item.has_custom_quantity
+    : (rawQty !== 1);
+
+  const qtyText = unitLabel === "шт" && rawQty > 1 ? `×${rawQty}` : `${rawQty} ${unitLabel}`;
+  const lineTotal = isCustomWeightOrQty ? price * rawQty : price;
+  const itemEmoji = getProductEmoji(item.item_name, item.category);
 
   // ── Touch Handlers ──────────────────────────────────────────────────────
 
@@ -100,22 +106,27 @@ export const ShoppingItem: React.FC<ShoppingItemProps> = ({
           )}
         </button>
 
+        {/* Custom Category/Product Emoji Badge */}
+        <div className="item-emoji-badge" aria-hidden="true">
+          {itemEmoji}
+        </div>
+
         {/* Item content */}
         <div className="item-content">
           <span className={`item-name ${item.is_purchased ? "done" : ""}`}>
             {item.item_name}
           </span>
-          {(hasCustomQty || lineTotal > 0) && (
+          {(isCustomWeightOrQty || lineTotal > 0) && (
             <span className="item-meta">
-              {hasCustomQty && `${qty} ${unitLabel}`}
-              {hasCustomQty && lineTotal > 0 && " · "}
+              {isCustomWeightOrQty && `${rawQty} ${unitLabel}`}
+              {isCustomWeightOrQty && lineTotal > 0 && " · "}
               {lineTotal > 0 && `${lineTotal.toLocaleString("ru-RU")} сум`}
             </span>
           )}
         </div>
 
         {/* Quantity badge */}
-        {hasCustomQty && !item.is_purchased && (
+        {isCustomWeightOrQty && !item.is_purchased && (
           <span className="item-qty-badge">{qtyText}</span>
         )}
 

@@ -149,13 +149,24 @@
   letter-spacing: -0.02em;
   color: var(--color-text);
   margin: 0;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.app-title-emoji {
+  font-size: 18px;
+  line-height: 1;
 }
 
 .app-title-count {
-  margin-left: 6px;
-  font-size: 13px;
-  font-weight: 500;
-  color: var(--color-text-tertiary);
+  margin-left: 2px;
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--color-accent);
+  background: var(--color-accent-soft);
+  padding: 1px 7px;
+  border-radius: var(--radius-full);
 }
 
 /* Status pill */
@@ -439,7 +450,7 @@
 
 .add-input-unit-btn {
   flex: 1;
-  padding: 6px;
+  padding: 6px 4px;
   border-radius: var(--radius-sm);
   border: 1px solid var(--color-border);
   background: none;
@@ -447,7 +458,16 @@
   font-size: 12px;
   font-weight: 500;
   cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 4px;
   transition: all var(--duration-fast);
+}
+
+.add-input-unit-btn .unit-icon {
+  font-size: 13px;
+  line-height: 1;
 }
 
 .add-input-unit-btn.active {
@@ -533,6 +553,29 @@
   background: var(--color-accent);
   border-color: var(--color-accent);
   color: #000;
+}
+
+/* Custom Product Emoji Badge */
+.item-emoji-badge {
+  width: 32px;
+  height: 32px;
+  border-radius: 8px;
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 16px;
+  flex-shrink: 0;
+  user-select: none;
+  transition: all var(--duration-fast);
+}
+
+.item-row.purchased .item-emoji-badge {
+  opacity: 0.45;
+  filter: grayscale(0.5);
+  background: transparent;
+  border-color: transparent;
 }
 
 /* Content */
@@ -789,6 +832,14 @@
   font-size: 13px;
   font-weight: 500;
   color: var(--color-text-secondary);
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.total-icon {
+  font-size: 15px;
+  line-height: 1;
 }
 
 .total-value {

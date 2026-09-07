@@ -65,7 +65,8 @@ export const App: React.FC = () => {
       <header className="app-header">
         <div className="app-header-left">
           <h1 className="app-title">
-            Покупки
+            <span className="app-title-emoji">🛒</span>
+            <span>Покупки</span>
             {pendingCount > 0 && (
               <span className="app-title-count">{pendingCount}</span>
             )}
@@ -93,7 +94,8 @@ export const App: React.FC = () => {
             type="button"
             onClick={() => setShowShareModal(true)}
             className="header-icon-btn"
-            aria-label="Поделиться списком"
+            aria-label="Семейный список"
+            title="Семейный список"
           >
             <Users className="w-4 h-4" />
           </button>
@@ -139,7 +141,7 @@ export const App: React.FC = () => {
         <div className="total-bar">
           <div className="total-bar-inner">
             <span className="total-label">
-              Итого {pendingCount > 0 ? `(${pendingCount} из ${totalItems})` : `(${totalItems})`}
+              <span className="total-icon">🧾</span> Итого {pendingCount > 0 ? `(${pendingCount} из ${totalItems})` : `(${totalItems})`}
             </span>
             <span className="total-value">
               {totalCost.toLocaleString("ru-RU")}

@@ -41,7 +41,7 @@ export const CompletedSection: React.FC<CompletedSectionProps> = ({
             className={`w-3.5 h-3.5 transition-transform ${isExpanded ? "rotate-90" : ""}`}
           />
           <Check className="w-3.5 h-3.5 text-emerald-500" />
-          <span>Куплено</span>
+          <span>✨ Куплено</span>
           <span className="completed-count">{items.length}</span>
         </div>
       </button>
@@ -71,7 +71,7 @@ export const CompletedSection: React.FC<CompletedSectionProps> = ({
               onClick={onClear}
               className="completed-clear-btn"
             >
-              Очистить купленное
+              🗑️ Очистить купленное
             </button>
           </motion.div>
         )}

@@ -9,7 +9,7 @@ import { Plus, ChevronDown } from "lucide-react";
 import { UNITS, type UnitType } from "../types";
 
 interface AddItemInputProps {
-  onAdd: (name: string, opts?: { price?: number; quantity?: number; unit?: string }) => void;
+  onAdd: (name: string, opts?: { price?: number; quantity?: number; unit?: string; hasCustomQuantity?: boolean }) => void;
   inputRef?: React.RefObject<HTMLInputElement>;
 }
 
@@ -28,11 +28,22 @@ export const AddItemInput: React.FC<AddItemInputProps> = ({ onAdd, inputRef: ext
 
     let finalName = raw;
     let finalPrice = price ? (parseFloat(price) || 0) : undefined;
-    let finalQty = quantity ? (parseFloat(quantity) || 1) : undefined;
+    let finalQty: number | undefined = undefined;
     let finalUnit: UnitType = unit;
+    let hasCustomQuantity = false;
 
-    // Smart natural language parsing if advanced fields are empty
-    if (!price && !quantity) {
+    // Check if user manually entered quantity in advanced field
+    if (quantity.trim()) {
+      const q = parseFloat(quantity);
+      if (!isNaN(q) && q > 0) {
+        finalQty = q;
+        finalUnit = unit;
+        hasCustomQuantity = true;
+      }
+    }
+
+    // Smart natural language parsing if advanced fields weren't explicitly filled
+    if (finalPrice === undefined && !hasCustomQuantity) {
       // 1. Check for trailing price: "30000", "25 000 сум", "15000uzs"
       const priceMatch = finalName.match(/(?:^|\s)(\d[\d\s]{2,})\s*(?:сум|sum|uzs)?$/i);
       if (priceMatch && priceMatch.index !== undefined) {
@@ -54,24 +65,52 @@ export const AddItemInput: React.FC<AddItemInputProps> = ({ onAdd, inputRef: ext
         else if (u === "л" || u === "l") finalUnit = "л";
         else if (u === "упак") finalUnit = "упак";
         else if (u === "г" || u === "g") finalUnit = "г";
+        else finalUnit = "шт";
 
+        hasCustomQuantity = true;
+        finalName = (finalName.slice(0, qtyMatch.index) + " " + finalName.slice(qtyMatch.index + qtyMatch[0].length)).trim();
+      }
+    } else if (finalPrice !== undefined && !hasCustomQuantity) {
+      // User entered price manually, but text might still contain a weight (e.g. "Яблоки 2 кг")
+      const qtyMatch = finalName.match(/(?:^|\s)(\d+(?:[.,]\d+)?)\s*(кг|шт|л|упак|г|kg|l|g)\b/i);
+      if (qtyMatch && qtyMatch.index !== undefined) {
+        finalQty = parseFloat(qtyMatch[1].replace(",", "."));
+        const u = qtyMatch[2].toLowerCase();
+        if (u === "кг" || u === "kg") finalUnit = "кг";
+        else if (u === "шт") finalUnit = "шт";
+        else if (u === "л" || u === "l") finalUnit = "л";
+        else if (u === "упак") finalUnit = "упак";
+        else if (u === "г" || u === "g") finalUnit = "г";
+        else finalUnit = "шт";
+
+        hasCustomQuantity = true;
         finalName = (finalName.slice(0, qtyMatch.index) + " " + finalName.slice(qtyMatch.index + qtyMatch[0].length)).trim();
       }
     }
 
     if (!finalName) finalName = raw;
 
-    const opts: { price?: number; quantity?: number; unit?: string } = {};
+    const opts: {
+      price?: number;
+      quantity?: number;
+      unit?: string;
+      hasCustomQuantity?: boolean;
+    } = {};
+
     if (finalPrice !== undefined) opts.price = finalPrice;
-    if (finalQty !== undefined) opts.quantity = finalQty;
-    if (finalUnit !== "шт" || finalQty !== undefined) opts.unit = finalUnit;
+    if (hasCustomQuantity && finalQty !== undefined) {
+      opts.quantity = finalQty;
+      opts.unit = finalUnit;
+      opts.hasCustomQuantity = true;
+    } else {
+      opts.hasCustomQuantity = false;
+    }
 
     onAdd(finalName, Object.keys(opts).length > 0 ? opts : undefined);
 
     setValue("");
     setPrice("");
     setQuantity("");
-    // Keep unit for sequential adds of same type
     activeRef.current?.focus();
   }, [value, price, quantity, unit, onAdd, activeRef]);
 
@@ -100,7 +139,7 @@ export const AddItemInput: React.FC<AddItemInputProps> = ({ onAdd, inputRef: ext
           value={value}
           onChange={(e) => setValue(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="Добавить товар..."
+          placeholder="Добавить товар... (например: Яблоки 2 кг 30000)"
           className="add-input-field"
           autoComplete="off"
           enterKeyHint="done"
@@ -141,7 +180,7 @@ export const AddItemInput: React.FC<AddItemInputProps> = ({ onAdd, inputRef: ext
           >
             <div className="add-input-advanced-grid">
               <div className="add-input-field-group">
-                <label className="add-input-label">Цена</label>
+                <label className="add-input-label">💰 Цена (сум)</label>
                 <input
                   type="number"
                   value={price}
@@ -153,13 +192,13 @@ export const AddItemInput: React.FC<AddItemInputProps> = ({ onAdd, inputRef: ext
                 />
               </div>
               <div className="add-input-field-group">
-                <label className="add-input-label">Кол-во</label>
+                <label className="add-input-label">⚖️ Вес / Кол-во</label>
                 <input
                   type="number"
                   value={quantity}
                   onChange={(e) => setQuantity(e.target.value)}
                   onKeyDown={handleKeyDown}
-                  placeholder="1"
+                  placeholder="Не указан"
                   min="0.1"
                   step="0.1"
                   className="add-input-number"
@@ -175,7 +214,8 @@ export const AddItemInput: React.FC<AddItemInputProps> = ({ onAdd, inputRef: ext
                   onClick={() => setUnit(u.value)}
                   className={`add-input-unit-btn ${unit === u.value ? "active" : ""}`}
                 >
-                  {u.label}
+                  <span className="unit-icon">{u.icon}</span>
+                  <span>{u.label}</span>
                 </button>
               ))}
             </div>

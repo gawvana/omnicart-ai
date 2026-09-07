@@ -19,7 +19,7 @@ export const EmptyState: React.FC<EmptyStateProps> = ({ onAdd }) => {
       </p>
       {onAdd && (
         <button type="button" onClick={onAdd} className="empty-state-cta">
-          Добавить товар
+          ✨ Добавить первый товар
         </button>
       )}
     </div>

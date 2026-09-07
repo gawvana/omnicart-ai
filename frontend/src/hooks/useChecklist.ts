@@ -117,22 +117,25 @@ export function useChecklist(): UseChecklistReturn {
 
   const addItem = useCallback((
     name: string,
-    opts?: { price?: number; quantity?: number; unit?: string; category?: string }
+    opts?: { price?: number; quantity?: number; unit?: string; category?: string; hasCustomQuantity?: boolean }
   ) => {
     const trimmed = name.trim();
     if (!trimmed) return;
 
     haptic("light");
 
+    const hasCustomQty = !!opts?.hasCustomQuantity && opts?.quantity !== undefined && opts.quantity > 0;
+
     const newItem: CartItem = {
       id: generateId(),
       item_name: trimmed,
       category: opts?.category ? matchCategory(opts.category) : "",
-      quantity: String(opts?.quantity ?? 1),
-      unit: opts?.unit || "шт",
+      quantity: hasCustomQty ? String(opts!.quantity) : "1",
+      unit: hasCustomQty ? (opts?.unit || "шт") : "шт",
       price_paid: String(opts?.price ?? 0),
       currency_code: "UZS",
       is_purchased: false,
+      has_custom_quantity: hasCustomQty,
       created_at: new Date().toISOString(),
     };
 
@@ -140,14 +143,14 @@ export function useChecklist(): UseChecklistReturn {
     setItems(updated);
     setSyncState("pending");
 
-    showToast({ type: "success", message: `${trimmed} добавлен` });
+    showToast({ type: "success", message: `✅ ${trimmed} добавлен` });
 
     // Background sync
     checklistApi.create({
       item_name: trimmed,
       category: newItem.category || undefined,
-      quantity: opts?.quantity ?? 1,
-      unit: opts?.unit || "шт",
+      quantity: hasCustomQty ? (opts?.quantity ?? 1) : 1,
+      unit: hasCustomQty ? (opts?.unit || "шт") : "шт",
       price_paid: opts?.price ?? 0,
     }).then(() => {
       offlineStore.removeMutation(
@@ -155,7 +158,7 @@ export function useChecklist(): UseChecklistReturn {
       );
       setSyncState("synced");
     }).catch(() => {
-      setSyncState("pending");
+      setSyncState(navigator.onLine ? "failed" : "offline");
     });
   }, [showToast]);
 
@@ -276,7 +279,9 @@ export function useChecklist(): UseChecklistReturn {
     items.reduce((sum, i) => {
       const price = parseFloat(i.price_paid) || 0;
       const qty = parseFloat(i.quantity) || 1;
-      return sum + price * qty;
+      const hasQty = i.has_custom_quantity ?? (qty !== 1);
+      const itemCost = hasQty ? price * qty : price;
+      return sum + itemCost;
     }, 0),
   [items]);
 
