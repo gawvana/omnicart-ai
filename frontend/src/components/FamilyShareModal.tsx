@@ -1,6 +1,7 @@
 import React, { useState } from "react";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Copy, Check, Users, Share2 } from "lucide-react";
+import { hapticSuccess, openTelegramLink } from "../services/telegram";
 
 interface FamilyShareModalProps {
   isOpen: boolean;
@@ -19,9 +20,7 @@ export const FamilyShareModal: React.FC<FamilyShareModalProps> = ({
   const handleCopy = () => {
     navigator.clipboard.writeText(shareLink);
     setCopied(true);
-    try {
-      (window as any).Telegram?.WebApp?.HapticFeedback?.notificationOccurred("success");
-    } catch {}
+    hapticSuccess();
     setTimeout(() => setCopied(false), 2000);
   };
 
@@ -30,11 +29,7 @@ export const FamilyShareModal: React.FC<FamilyShareModalProps> = ({
       "Давай вести список покупок вместе! Открой ссылку в боте OmniCart AI:\n" + shareLink
     );
     const tgUrl = `https://t.me/share/url?url=${encodeURIComponent(shareLink)}&text=${text}`;
-    try {
-      (window as any).Telegram?.WebApp?.openTelegramLink?.(tgUrl);
-    } catch {
-      window.open(tgUrl, "_blank");
-    }
+    openTelegramLink(tgUrl);
   };
 
   if (!isOpen) return null;

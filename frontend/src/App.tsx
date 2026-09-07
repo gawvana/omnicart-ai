@@ -1,199 +1,160 @@
-import React, { useState, useEffect, useCallback } from "react";
-import {
-  WifiOff,
-} from "lucide-react";
+/**
+ * OmniCart AI — App Shell
+ * Minimal header + content + toast layer.
+ */
 
-import ChecklistScreen from "./screens/ChecklistScreen";
-import DynamicIsland, { IslandNotification } from "./components/DynamicIsland";
-import { OfflineStorage, SyncMutation } from "./utils/offlineStorage";
+import React, { useEffect, useRef, useCallback } from "react";
+import { WifiOff, Users } from "lucide-react";
 
-function getTelegramWebApp(): any {
-  return (window as any).Telegram?.WebApp ?? null;
-}
+import { useChecklist } from "./hooks/useChecklist";
+import { initTelegram, applyThemeColors, onThemeChange, getUserId } from "./services/telegram";
 
-function getInitData(): string {
-  return getTelegramWebApp()?.initData ?? "";
-}
+import Toast from "./components/Toast";
+import AddItemInput from "./components/AddItemInput";
+import ShoppingItem from "./components/ShoppingItem";
+import CompletedSection from "./components/CompletedSection";
+import EmptyState from "./components/EmptyState";
+import FamilyShareModal from "./components/FamilyShareModal";
 
 export const App: React.FC = () => {
-  const [notification, setNotification] = useState<IslandNotification | null>(null);
-  const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
+  const {
+    pendingItems,
+    purchasedItems,
+    pendingCount,
+    totalCost,
+    syncState,
+    toast,
+    dismissToast,
+    addItem,
+    toggleItem,
+    deleteItem,
+    undoDelete,
+    clearPurchased,
+  } = useChecklist();
 
-  // Sync offline mutations with backend
-  const syncPendingMutations = useCallback(async (queue: SyncMutation[]) => {
-    if (!queue.length) return;
-    const initData = getInitData();
-    let syncedCount = 0;
+  const [showShareModal, setShowShareModal] = React.useState(false);
+  const addInputRef = useRef<HTMLInputElement>(null);
 
-    for (const mutation of queue) {
-      try {
-        if (mutation.action === "CREATE") {
-          await fetch("/api/v1/checklist", {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-              Authorization: `tma ${initData}`,
-            },
-            body: JSON.stringify({
-              item_name: mutation.item.item_name,
-              category: mutation.item.category,
-              quantity: parseFloat(mutation.item.quantity) || 1.0,
-              unit: mutation.item.unit,
-              price_paid: parseFloat(mutation.item.price_paid) || 0,
-            }),
-          });
-          syncedCount++;
-        } else if (mutation.action === "UPDATE") {
-          // If ID is optimistic (opt_), skipping toggle patch to non-existent UUID on server
-          if (!mutation.item.id.startsWith("opt_")) {
-            await fetch(`/api/v1/checklist/${mutation.item.id}/toggle`, {
-              method: "PATCH",
-              headers: {
-                "Content-Type": "application/json",
-                Authorization: `tma ${initData}`,
-              },
-              body: JSON.stringify({ is_purchased: mutation.item.is_purchased }),
-            });
-            syncedCount++;
-          }
-        } else if (mutation.action === "DELETE") {
-          if (!mutation.item.id.startsWith("opt_")) {
-            await fetch(`/api/v1/checklist/${mutation.item.id}`, {
-              method: "DELETE",
-              headers: { Authorization: `tma ${initData}` },
-            });
-            syncedCount++;
-          }
-        }
-      } catch (err) {
-        console.warn("[App] Sync mutation failed:", err);
-      }
-    }
-
-    if (syncedCount > 0) {
-      setNotification({
-        id: String(Date.now()),
-        type: "success",
-        title: "Синхронизация завершена",
-        subtitle: `Обновлено ${syncedCount} изменений на сервере`,
-      });
-    }
-  }, []);
+  // ── Telegram Init ───────────────────────────────────────────────────────
 
   useEffect(() => {
-    const tg = getTelegramWebApp();
-    if (tg) {
-      tg.ready();
-      try {
-        tg.expand();
-        tg.setHeaderColor?.("#000000");
-        tg.setBackgroundColor?.("#000000");
-        tg.enableClosingConfirmation?.();
-      } catch (err) {
-        console.warn("[App] Telegram WebApp setup error:", err);
-      }
-
-      // Theme change handler
-      const handleThemeChanged = () => {
-        try {
-          const isDark = tg.colorScheme === "dark";
-          document.documentElement.classList.toggle("dark", isDark);
-        } catch {}
-      };
-      tg.onEvent?.("themeChanged", handleThemeChanged);
-
-      return () => {
-        tg.offEvent?.("themeChanged", handleThemeChanged);
-      };
-    }
+    initTelegram();
+    applyThemeColors();
+    return onThemeChange(applyThemeColors);
   }, []);
 
-  useEffect(() => {
-    // Network status listener & queue synchronization
-    const handleOnline = async () => {
-      setIsOnline(true);
-      setNotification({
-        id: String(Date.now()),
-        type: "success",
-        title: "Сеть восстановлена",
-        subtitle: "Синхронизация данных с сервером...",
-      });
+  // ── Focus add input for empty state CTA ─────────────────────────────────
 
-      const queue = OfflineStorage.flushSyncQueue();
-      if (queue.length > 0) {
-        await syncPendingMutations(queue);
-      }
-    };
+  const focusAddInput = useCallback(() => {
+    addInputRef.current?.focus();
+  }, []);
 
-    const handleOffline = () => {
-      setIsOnline(false);
-      setNotification({
-        id: String(Date.now()),
-        type: "offline",
-        title: "Офлайн-режим активирован",
-        subtitle: "Вычеркивайте товары без интернета",
-      });
-    };
-
-    window.addEventListener("online", handleOnline);
-    window.addEventListener("offline", handleOffline);
-
-    // Initial check for pending queue on startup
-    if (navigator.onLine) {
-      const pending = OfflineStorage.getQueue();
-      if (pending.length > 0) {
-        const flushed = OfflineStorage.flushSyncQueue();
-        syncPendingMutations(flushed);
-      }
-    }
-
-    return () => {
-      window.removeEventListener("online", handleOnline);
-      window.removeEventListener("offline", handleOffline);
-    };
-  }, [syncPendingMutations]);
+  const totalItems = pendingItems.length + purchasedItems.length;
+  const isOffline = syncState === "offline";
 
   return (
-    <main className="min-h-[100dvh] w-full bg-black text-white flex flex-col font-sans selection:bg-white selection:text-black">
-      {/* iOS Dynamic Island (Interactive top notification pill) */}
-      <DynamicIsland
-        notification={notification}
-        onDismiss={() => setNotification(null)}
+    <main className="app-shell">
+      {/* Toast */}
+      <Toast
+        toast={toast}
+        onDismiss={dismissToast}
+        onAction={undoDelete}
       />
 
-      {/* Top Header with Safe Area Inset */}
-      <header className="sticky top-0 z-40 w-full px-4 pt-safe pb-2.5 bg-black/80 backdrop-blur-2xl border-b border-white/[0.06] flex items-center justify-between">
-        <div className="flex items-center gap-2">
-          <div className="w-6 h-6 rounded-md bg-white flex items-center justify-center text-black font-black text-xs shadow-md">
-            O
-          </div>
-          <span className="text-sm font-semibold tracking-tight text-white">
-            OmniCart AI
-          </span>
+      {/* Header */}
+      <header className="app-header">
+        <div className="app-header-left">
+          <h1 className="app-title">
+            Покупки
+            {pendingCount > 0 && (
+              <span className="app-title-count">{pendingCount}</span>
+            )}
+          </h1>
         </div>
 
-        {/* Status pill */}
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.06] text-[11px] text-zinc-400 font-medium">
-          {isOnline ? (
-            <>
-              <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span>Онлайн</span>
-            </>
-          ) : (
-            <>
-              <WifiOff className="w-3 h-3 text-amber-400" />
-              <span className="text-amber-400 font-semibold">Офлайн</span>
-            </>
-          )}
+        <div className="app-header-right">
+          {/* Sync / offline indicator */}
+          <div className={`status-pill ${isOffline ? "offline" : ""}`}>
+            {isOffline ? (
+              <>
+                <WifiOff className="w-3 h-3" />
+                <span>Офлайн</span>
+              </>
+            ) : (
+              <>
+                <span className="status-dot" />
+                <span>Онлайн</span>
+              </>
+            )}
+          </div>
+
+          {/* Family share */}
+          <button
+            type="button"
+            onClick={() => setShowShareModal(true)}
+            className="header-icon-btn"
+            aria-label="Поделиться списком"
+          >
+            <Users className="w-4 h-4" />
+          </button>
         </div>
       </header>
 
-      {/* Main Content */}
-      <div className="flex-1 w-full max-w-md mx-auto">
-        <ChecklistScreen
-          onNotify={(notif) => setNotification(notif)}
-        />
+      {/* Content */}
+      <div className="app-content">
+        {/* Add input (always visible) */}
+        <AddItemInput onAdd={addItem} inputRef={addInputRef} />
+
+        {totalItems === 0 ? (
+          <EmptyState onAdd={focusAddInput} />
+        ) : (
+          <div className="items-list">
+            {/* Pending items */}
+            {pendingItems.length > 0 && (
+              <div className="pending-section" role="list">
+                {pendingItems.map((item) => (
+                  <ShoppingItem
+                    key={item.id}
+                    item={item}
+                    onToggle={toggleItem}
+                    onDelete={deleteItem}
+                  />
+                ))}
+              </div>
+            )}
+
+            {/* Purchased items (collapsible) */}
+            <CompletedSection
+              items={purchasedItems}
+              onToggle={toggleItem}
+              onDelete={deleteItem}
+              onClear={clearPurchased}
+            />
+          </div>
+        )}
       </div>
+
+      {/* Sticky total bar */}
+      {totalItems > 0 && (
+        <div className="total-bar">
+          <div className="total-bar-inner">
+            <span className="total-label">
+              Итого {pendingCount > 0 ? `(${pendingCount} из ${totalItems})` : `(${totalItems})`}
+            </span>
+            <span className="total-value">
+              {totalCost.toLocaleString("ru-RU")}
+              <span className="total-currency"> сум</span>
+            </span>
+          </div>
+        </div>
+      )}
+
+      {/* Family Share Modal */}
+      <FamilyShareModal
+        isOpen={showShareModal}
+        onClose={() => setShowShareModal(false)}
+        userId={getUserId()}
+      />
     </main>
   );
 };
