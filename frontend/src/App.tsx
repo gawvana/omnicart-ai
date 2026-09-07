@@ -1,17 +1,11 @@
 import React, { useState, useEffect, useCallback } from "react";
-import { motion, AnimatePresence } from "framer-motion";
 import {
-  ShoppingBag,
-  Store,
   WifiOff,
 } from "lucide-react";
 
 import ChecklistScreen from "./screens/ChecklistScreen";
-import GulistonMarketScreen from "./screens/GulistonMarketScreen";
 import DynamicIsland, { IslandNotification } from "./components/DynamicIsland";
 import { OfflineStorage, SyncMutation } from "./utils/offlineStorage";
-
-type TabType = "checklist" | "market";
 
 function getTelegramWebApp(): any {
   return (window as any).Telegram?.WebApp ?? null;
@@ -21,14 +15,7 @@ function getInitData(): string {
   return getTelegramWebApp()?.initData ?? "";
 }
 
-function triggerHaptic(type: "light" | "medium" | "heavy" = "light"): void {
-  try {
-    getTelegramWebApp()?.HapticFeedback?.impactOccurred(type);
-  } catch {}
-}
-
 export const App: React.FC = () => {
-  const [activeTab, setActiveTab] = useState<TabType>("checklist");
   const [notification, setNotification] = useState<IslandNotification | null>(null);
   const [isOnline, setIsOnline] = useState<boolean>(navigator.onLine);
 
@@ -166,11 +153,6 @@ export const App: React.FC = () => {
     };
   }, [syncPendingMutations]);
 
-  const handleTabChange = (tab: TabType) => {
-    triggerHaptic("light");
-    setActiveTab(tab);
-  };
-
   return (
     <main className="min-h-[100dvh] w-full bg-black text-white flex flex-col font-sans selection:bg-white selection:text-black">
       {/* iOS Dynamic Island (Interactive top notification pill) */}
@@ -180,22 +162,22 @@ export const App: React.FC = () => {
       />
 
       {/* Top Header with Safe Area Inset */}
-      <header className="sticky top-0 z-40 w-full px-4 pt-safe pb-2.5 bg-white/10 backdrop-blur-3xl border-b border-white/20 flex items-center justify-between shadow-[0_4px_30px_rgba(0,0,0,0.1)]">
+      <header className="sticky top-0 z-40 w-full px-4 pt-safe pb-2.5 bg-black/80 backdrop-blur-2xl border-b border-white/[0.06] flex items-center justify-between">
         <div className="flex items-center gap-2">
           <div className="w-6 h-6 rounded-md bg-white flex items-center justify-center text-black font-black text-xs shadow-md">
             O
           </div>
-          <span className="text-sm font-semibold tracking-tight text-white drop-shadow-sm">
+          <span className="text-sm font-semibold tracking-tight text-white">
             OmniCart AI
           </span>
         </div>
 
-        {/* Status / Location pill */}
-        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.06] border border-white/10 text-[11px] text-zinc-300 font-medium shadow-inner">
+        {/* Status pill */}
+        <div className="flex items-center gap-1.5 px-2.5 py-1 rounded-full bg-white/[0.04] border border-white/[0.06] text-[11px] text-zinc-400 font-medium">
           {isOnline ? (
             <>
               <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-              <span>Гулистан</span>
+              <span>Онлайн</span>
             </>
           ) : (
             <>
@@ -206,77 +188,12 @@ export const App: React.FC = () => {
         </div>
       </header>
 
-      {/* Main Tab Content */}
+      {/* Main Content */}
       <div className="flex-1 w-full max-w-md mx-auto">
-        <AnimatePresence mode="wait">
-          {activeTab === "checklist" && (
-            <motion.div
-              key="checklist"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.15 }}
-            >
-              <ChecklistScreen
-                onNotify={(notif) => setNotification(notif)}
-              />
-            </motion.div>
-          )}
-
-          {activeTab === "market" && (
-            <motion.div
-              key="market"
-              initial={{ opacity: 0, y: 6 }}
-              animate={{ opacity: 1, y: 0 }}
-              exit={{ opacity: 0, y: -6 }}
-              transition={{ duration: 0.15 }}
-            >
-              <GulistonMarketScreen
-                onAddItem={() => {
-                  setNotification({
-                    id: String(Date.now()),
-                    type: "success",
-                    title: "Товар добавлен из цен Гулистана",
-                  });
-                }}
-              />
-            </motion.div>
-          )}
-        </AnimatePresence>
+        <ChecklistScreen
+          onNotify={(notif) => setNotification(notif)}
+        />
       </div>
-
-      {/* Floating Frosted Glass Tab Bar with Safe Area Bottom */}
-      <nav className="fixed bottom-0 left-0 right-0 z-50 px-4 pb-safe pt-2 bg-white/5 backdrop-blur-3xl border-t border-white/20 shadow-[0_-4px_30px_rgba(0,0,0,0.1)]">
-        <div className="max-w-md mx-auto grid grid-cols-2 gap-1">
-          {/* Tab 1: Checklist */}
-          <button
-            type="button"
-            onClick={() => handleTabChange("checklist")}
-            className={`flex flex-col items-center justify-center py-1.5 rounded-xl transition ios-tap ${
-              activeTab === "checklist"
-                ? "text-white bg-white/[0.08] shadow-sm"
-                : "text-zinc-500 hover:text-zinc-300"
-            }`}
-          >
-            <ShoppingBag className="w-5 h-5" />
-            <span className="text-[10px] font-medium mt-1">Чек-лист</span>
-          </button>
-
-          {/* Tab 2: Guliston Market */}
-          <button
-            type="button"
-            onClick={() => handleTabChange("market")}
-            className={`flex flex-col items-center justify-center py-1.5 rounded-xl transition ios-tap ${
-              activeTab === "market"
-                ? "text-white bg-white/[0.08] shadow-sm"
-                : "text-zinc-500 hover:text-zinc-300"
-            }`}
-          >
-            <Store className="w-5 h-5" />
-            <span className="text-[10px] font-medium mt-1">Рынок Гулистан</span>
-          </button>
-        </div>
-      </nav>
     </main>
   );
 };
