@@ -65,8 +65,8 @@ export const App: React.FC = () => {
       <header className="app-header">
         <div className="app-header-left">
           <h1 className="app-title flex items-center gap-2.5">
-            <div className="w-8 h-8 rounded-xl bg-gradient-to-tr from-emerald-500 to-teal-400 p-0.5 shadow-md shadow-emerald-500/20 flex items-center justify-center shrink-0">
-              <ShoppingCart className="w-4 h-4 text-white stroke-[2.5]" />
+            <div className="w-8 h-8 rounded-xl bg-accent p-0.5 shadow-md flex items-center justify-center shrink-0">
+              <ShoppingCart className="w-4 h-4 text-primary stroke-[2.5]" />
             </div>
             <span>Покупки</span>
             {pendingCount > 0 && (
@@ -143,7 +143,7 @@ export const App: React.FC = () => {
         <div className="total-bar">
           <div className="total-bar-inner">
             <span className="total-label flex items-center gap-1.5">
-              <Receipt className="w-4 h-4 text-emerald-400" />
+              <Receipt className="w-4 h-4 text-accent" />
               <span>Итого {pendingCount > 0 ? `(${pendingCount} из ${totalItems})` : `(${totalItems})`}</span>
             </span>
             <span className="total-value">

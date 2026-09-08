@@ -128,3 +128,35 @@ class TelegramSecurityValidator:
             hash=received_hash,
             raw_data=parsed_pairs,
         )
+
+
+def encrypt_telegram_id(telegram_id: int, secret: str) -> str:
+    """
+    Symmetrically encrypt an integer Telegram ID using secret_key with CTR-style keystream.
+    Format: <hex_iv>:<hex_ciphertext>
+    """
+    import secrets
+
+    key = hashlib.sha256(secret.encode("utf-8")).digest()
+    iv = secrets.token_bytes(16)
+    data = str(telegram_id).encode("utf-8")
+    keystream = hmac.new(key, iv, hashlib.sha256).digest()
+    cipher = bytes(b ^ k for b, k in zip(data, keystream))
+    return f"{iv.hex()}:{cipher.hex()}"
+
+
+def decrypt_telegram_id(payload: str, secret: str) -> Optional[int]:
+    """
+    Decrypt a payload produced by encrypt_telegram_id. Returns None if invalid or corrupted.
+    """
+    try:
+        iv_hex, cipher_hex = payload.split(":", 1)
+        iv = bytes.fromhex(iv_hex)
+        cipher = bytes.fromhex(cipher_hex)
+        key = hashlib.sha256(secret.encode("utf-8")).digest()
+        keystream = hmac.new(key, iv, hashlib.sha256).digest()
+        data = bytes(b ^ k for b, k in zip(cipher, keystream))
+        return int(data.decode("utf-8"))
+    except Exception:
+        return None
+

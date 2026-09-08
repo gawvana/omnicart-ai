@@ -5,7 +5,7 @@ Handles:
 - Any messy copied text / Xiaomi Notes / iPhone notes
 - Voice-to-text transcriptions
 - Recipe reversal (extracting scaled ingredients)
-- Auto-tagging into Guliston Bazaar aisles
+- Auto-tagging into standard bazaar aisles
 """
 
 from __future__ import annotations
@@ -21,7 +21,7 @@ from services.b_ai_client import BAIClient, BAIClientError
 
 logger = logging.getLogger(__name__)
 
-# Standard Bazaar aisles in Guliston
+# Standard bazaar aisles
 BAZAAR_CATEGORIES = [
     "🥩 Мясной отдел",
     "🥦 Овощные ряды",

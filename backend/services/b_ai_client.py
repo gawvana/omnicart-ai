@@ -283,7 +283,7 @@ class BAIClient:
                 res_data = response.json()
                 return res_data.get("text", "")
             logger.warning("Audio transcription returned status %d: %s", response.status_code, response.text[:200])
-        except Exception as exc:
+        except (httpx.HTTPError, httpx.TimeoutException, json.JSONDecodeError, KeyError) as exc:
             logger.warning("Whisper audio transcription error: %s", exc)
         return ""
 

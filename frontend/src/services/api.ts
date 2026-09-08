@@ -56,6 +56,16 @@ async function request<T>(
         detail = body.error || detail;
         requestId = body.request_id;
       } catch {}
+
+      // User-friendly messages for common HTTP errors
+      if (res.status === 401) {
+        detail = "Сессия истекла. Откройте приложение заново из Telegram";
+      } else if (res.status === 403) {
+        detail = "Доступ запрещён";
+      } else if (res.status === 429) {
+        detail = "Слишком много запросов. Подождите минуту";
+      }
+
       throw new ApiClientError(detail, res.status, requestId);
     }
 

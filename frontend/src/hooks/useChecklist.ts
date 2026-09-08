@@ -5,7 +5,7 @@
  */
 
 import { useState, useEffect, useCallback, useMemo, useRef } from "react";
-import { offlineStore, generateId } from "../storage/offlineStore";
+import { offlineStore, generateId, onCorruptedCache } from "../storage/offlineStore";
 import { processQueue } from "../storage/syncEngine";
 import checklistApi from "../services/checklistApi";
 import { haptic, hapticSuccess } from "../services/telegram";
@@ -37,7 +37,7 @@ export function useChecklist(): UseChecklistReturn {
   const [toast, setToast] = useState<ToastData | null>(null);
 
   // Undo state
-  const undoRef = useRef<{ item: CartItem; timer: ReturnType<typeof setTimeout> } | null>(null);
+  const undoRef = useRef<{ item: CartItem; timer: ReturnType<typeof setTimeout>; serverDeleteSent?: () => boolean } | null>(null);
 
   // Auto-dismiss toast
   useEffect(() => {
@@ -51,6 +51,20 @@ export function useChecklist(): UseChecklistReturn {
   }, []);
 
   const dismissToast = useCallback(() => setToast(null), []);
+
+  // Listen for local cache corruption recovery events
+  useEffect(() => {
+    const unsubscribe = onCorruptedCache((recoveredCount) => {
+      showToast({
+        type: "offline",
+        message:
+          recoveredCount > 0
+            ? `Локальный кэш был повреждён и восстановлен (${recoveredCount} операций сохранено)`
+            : "Локальный кэш был повреждён и сброшен",
+      });
+    });
+    return unsubscribe;
+  }, [showToast]);
 
   // ── Background Sync ─────────────────────────────────────────────────────
 
@@ -205,8 +219,12 @@ export function useChecklist(): UseChecklistReturn {
     const updated = offlineStore.removeItem(id);
     setItems(updated);
 
+    // Track whether server delete was dispatched
+    let serverDeleteSent = false;
+
     // Set up undo with timer
     const timer = setTimeout(() => {
+      serverDeleteSent = true;
       undoRef.current = null;
       // Actually sync the delete
       checklistApi.remove(id).then(() => {
@@ -216,7 +234,7 @@ export function useChecklist(): UseChecklistReturn {
       }).catch(() => {});
     }, 5000);
 
-    undoRef.current = { item: target, timer };
+    undoRef.current = { item: target, timer, serverDeleteSent: () => serverDeleteSent };
 
     showToast({
       type: "info",
@@ -235,6 +253,7 @@ export function useChecklist(): UseChecklistReturn {
 
     clearTimeout(undoRef.current.timer);
     const restored = undoRef.current.item;
+    const wasServerDeleteSent = undoRef.current.serverDeleteSent?.() ?? false;
     undoRef.current = null;
 
     // Remove the DELETE mutation from queue
@@ -244,11 +263,22 @@ export function useChecklist(): UseChecklistReturn {
       offlineStore.removeMutation(deleteMut.id);
     }
 
-    // Re-add the item
+    // Re-add the item locally
     const state = offlineStore.getItems();
     state.unshift(restored);
     offlineStore.saveItems(state);
     setItems([...state]);
+
+    // If server delete already dispatched, issue compensating create
+    if (wasServerDeleteSent) {
+      checklistApi.create({
+        item_name: restored.item_name,
+        category: restored.category || undefined,
+        quantity: parseFloat(restored.quantity) || 1,
+        unit: restored.unit || "шт",
+        price_paid: parseFloat(restored.price_paid) || 0,
+      }).catch(() => {});
+    }
 
     haptic("light");
     showToast({ type: "success", message: `${restored.item_name} восстановлен` });

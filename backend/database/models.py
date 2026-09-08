@@ -29,29 +29,8 @@ from sqlalchemy import (
     Uuid,
     func,
 )
-from sqlalchemy.ext.asyncio import AsyncAttrs, async_sessionmaker, create_async_engine
+from sqlalchemy.ext.asyncio import AsyncAttrs
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
-
-from core.config import get_settings
-
-
-# ── Engine & Session Factory ─────────────────────────────────────────────────
-
-def build_engine() -> tuple[object, async_sessionmaker[object]]:
-    settings = get_settings()
-    engine_kwargs: dict[str, Any] = {
-        "echo": settings.debug,
-    }
-    if "sqlite" not in settings.database_url:
-        engine_kwargs.update({
-            "pool_size": 20,
-            "max_overflow": 10,
-            "pool_pre_ping": True,
-            "pool_recycle": 3600,
-        })
-    engine = create_async_engine(settings.database_url, **engine_kwargs)
-    session_factory = async_sessionmaker(engine, expire_on_commit=False)
-    return engine, session_factory
 
 
 # ── Base ─────────────────────────────────────────────────────────────────────
@@ -116,10 +95,10 @@ class User(Base):
         back_populates="user", uselist=False, cascade="all, delete-orphan", lazy="selectin"
     )
     purchases: Mapped[list["PurchaseHistory"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="user", cascade="all, delete-orphan", lazy="noload"
     )
     predictive_intervals: Mapped[list["PredictiveInterval"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan", lazy="selectin"
+        back_populates="user", cascade="all, delete-orphan", lazy="noload"
     )
 
 
@@ -345,27 +324,5 @@ class LocalPriceIndex(Base):
     product: Mapped["Product"] = relationship(back_populates="price_indices")
 
 
-class PriceHistory(Base):
-    """
-    Crowdsourced and monitored price logs for Guliston and local markets.
-    Used by Market Price Estimator for IQR outlier filtering, median calculations, and price trends.
-    """
 
-    __tablename__ = "price_history"
-    __table_args__ = (
-        Index("ix_price_history_item_created", "item_name", "created_at"),
-        Index("ix_price_history_market_created", "market_name", "created_at"),
-        CheckConstraint("price > 0", name="ck_price_history_positive_price"),
-    )
-
-    id: Mapped[uuid.UUID] = mapped_column(
-        Uuid(as_uuid=True), primary_key=True, default=uuid.uuid4
-    )
-    item_name: Mapped[str] = mapped_column(String(255), nullable=False, index=True)
-    price: Mapped[Decimal] = mapped_column(Numeric(12, 2), nullable=False)
-    market_name: Mapped[str] = mapped_column(String(128), nullable=False)
-    reporter_id: Mapped[Optional[int]] = mapped_column(BigInteger, nullable=True)
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), default=_utcnow, server_default=func.now(), index=True
-    )
 

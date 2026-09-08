@@ -23,10 +23,10 @@ const iconMap = {
 };
 
 const colorMap = {
-  success: "text-emerald-400",
-  info: "text-zinc-300",
-  error: "text-red-400",
-  offline: "text-amber-400",
+  success: "text-accent",
+  info: "text-secondary",
+  error: "text-destructive",
+  offline: "text-warning",
 };
 
 export const Toast: React.FC<ToastProps> = ({ toast, onDismiss, onAction }) => {

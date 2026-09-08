@@ -1,16 +1,6 @@
 """
-OmniCart AI — Streamlined, Production-Grade Telegram Bot Handlers.
-Features:
-- Robust HTML parsing with html.escape (replaces fragile MarkdownV2)
-- Message chunking (<4000 chars) to prevent Telegram length limit exceptions
-- Guaranteed callback.answer() and safe MessageIsNotModified handling
-- Minimalist 3-button bottom keyboard: [📋 Мой список, 🛒 Добавить регулярные, 🚀 Открыть приложение]
-- Grouped bazaar aisle formatting (🥩, 🥦, 🍞, 🥛, 🧼)
-- Universal AI parser for text & copied Xiaomi Notes
-- Whisper voice message transcription
-- Recipe analysis & ingredient scaling
-- Family Cart synchronization via deep-links (/start cart_<id>)
-- Market overview for Guliston bazaar with refresh & cancel navigation
+OmniCart AI — Telegram Bot Handlers.
+Fast, reliable in-chat checklist management with voice/text input and family sync.
 """
 
 from __future__ import annotations
@@ -18,15 +8,15 @@ from __future__ import annotations
 import html
 import io
 import logging
-import re
+import time
 import uuid
 from decimal import Decimal
 from typing import Any, List, Optional
 
-from aiogram import Bot, Dispatcher, F, Router, types
+from aiogram import Bot, F, Router, types
 from aiogram.enums import ParseMode
 from aiogram.exceptions import TelegramBadRequest
-from aiogram.filters import Command, CommandObject, CommandStart
+from aiogram.filters import CommandObject, CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.types import (
@@ -41,11 +31,11 @@ from aiogram.types import (
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
+from bot.i18n import STRINGS as BOT_STRINGS, t
 from core.config import get_settings
-from database.models import PriceHistory, PurchaseHistory, User, UserSettings, hash_telegram_id
+from core.security import decrypt_telegram_id, encrypt_telegram_id
+from database.models import PurchaseHistory, User, UserSettings, hash_telegram_id
 from services.b_ai_client import BAIClient
-from services.cron_parser import PriceCronService
-from services.guliston_market_service import GulistonMarketService
 from services.universal_ai_parser import UniversalAIParser
 
 logger = logging.getLogger(__name__)
@@ -53,22 +43,31 @@ logger = logging.getLogger(__name__)
 router = Router(name="start_router")
 
 
-# ── FSM States ───────────────────────────────────────────────────────────────
-
 class FormState(StatesGroup):
     waiting_for_custom_item = State()
     waiting_for_recipe = State()
 
 
-# ── Text Helpers & Chunking ──────────────────────────────────────────────────
+# ── Rate Limiter for Deep-Link Joins ──────────────────────────────────────────
+_JOIN_ATTEMPTS: dict[int, list[float]] = {}
+
+
+def _check_join_rate_limit(user_id: int) -> bool:
+    now = time.time()
+    cutoff = now - 3600
+    attempts = [ts for ts in _JOIN_ATTEMPTS.get(user_id, []) if ts > cutoff]
+    if len(attempts) >= 3:
+        return False
+    attempts.append(now)
+    _JOIN_ATTEMPTS[user_id] = attempts
+    return True
+
 
 def escape_html(text: str) -> str:
-    """Escapes HTML special characters to prevent markup injection or parse errors."""
     return html.escape(text or "")
 
 
 def chunk_text(text: str, max_chars: int = 4000) -> List[str]:
-    """Splits long text into Telegram-safe chunks."""
     if len(text) <= max_chars:
         return [text]
 
@@ -95,50 +94,31 @@ def chunk_text(text: str, max_chars: int = 4000) -> List[str]:
 # ── Keyboards ────────────────────────────────────────────────────────────────
 
 def build_main_inline_keyboard(web_app_url: str, current_lang: str = "ru") -> InlineKeyboardMarkup:
-    """Inline menu keyboard with WebApp, Market Overview, and Help."""
-    if current_lang.startswith("uz"):
-        open_app_text = "🛍 OmniCart Mini App-ni ochish"
-        market_text = "📊 Guliston bozor narxlari"
-        help_text = "ℹ️ Yordam"
-    elif current_lang.startswith("en"):
-        open_app_text = "🛍 Open OmniCart Mini App"
-        market_text = "📊 Guliston Market Prices"
-        help_text = "ℹ️ Help"
-    else:
-        open_app_text = "🛍 Открыть OmniCart Mini App"
-        market_text = "📊 Цены рынка Гулистан"
-        help_text = "ℹ️ Справка"
-
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=open_app_text, web_app=WebAppInfo(url=web_app_url))],
-            [
-                InlineKeyboardButton(text=market_text, callback_query_data="view_guliston_market"),
-                InlineKeyboardButton(text=help_text, callback_query_data="view_bot_help"),
-            ],
+            [InlineKeyboardButton(text=t("open_app", current_lang), web_app=WebAppInfo(url=web_app_url))],
+            [InlineKeyboardButton(text=t("help", current_lang), callback_data="view_bot_help")],
         ]
     )
 
 
 def build_cancel_keyboard(current_lang: str = "ru") -> InlineKeyboardMarkup:
-    cancel_text = "❌ Bekor qilish" if current_lang.startswith("uz") else ("❌ Cancel" if current_lang.startswith("en") else "❌ Отмена")
     return InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text=cancel_text, callback_query_data="cancel_action")]
+            [InlineKeyboardButton(text=t("cancel", current_lang), callback_data="cancel_action")]
         ]
     )
 
 
-def get_main_reply_keyboard(webapp_url: str) -> ReplyKeyboardMarkup:
-    """Streamlined persistent bottom keyboard with only 3 essential actions."""
+def get_main_reply_keyboard(webapp_url: str, current_lang: str = "ru") -> ReplyKeyboardMarkup:
     return ReplyKeyboardMarkup(
         keyboard=[
             [
-                KeyboardButton(text="📋 Мой список"),
-                KeyboardButton(text="🛒 Добавить регулярные"),
+                KeyboardButton(text=t("my_list", current_lang)),
+                KeyboardButton(text=t("add_staples", current_lang)),
             ],
             [
-                KeyboardButton(text="🚀 Открыть приложение", web_app=WebAppInfo(url=webapp_url)),
+                KeyboardButton(text=t("open_webapp", current_lang), web_app=WebAppInfo(url=webapp_url)),
             ],
         ],
         resize_keyboard=True,
@@ -146,10 +126,13 @@ def get_main_reply_keyboard(webapp_url: str) -> ReplyKeyboardMarkup:
     )
 
 
-# ── Helper: Get or Create DB User ───────────────────────────────────────────
+# ── User DB Helper ──────────────────────────────────────────────────────────
 
 async def get_or_create_user(session: AsyncSession, tg_user: types.User) -> User:
+    settings = get_settings()
     tg_id_hash = hash_telegram_id(tg_user.id)
+    encrypted_tg_id = encrypt_telegram_id(tg_user.id, settings.secret_key) if settings.secret_key else None
+
     result = await session.execute(
         select(User).where(User.telegram_id_hash == tg_id_hash)
     )
@@ -162,6 +145,7 @@ async def get_or_create_user(session: AsyncSession, tg_user: types.User) -> User
         db_user = User(
             id=user_uuid,
             telegram_id_hash=tg_id_hash,
+            telegram_id_encrypted=encrypted_tg_id,
             username=tg_user.username[:255] if tg_user.username else None,
             first_name=tg_user.first_name[:255] if tg_user.first_name else None,
             language_code=user_lang[:10],
@@ -172,7 +156,7 @@ async def get_or_create_user(session: AsyncSession, tg_user: types.User) -> User
             id=uuid.uuid4(),
             user_id=user_uuid,
             country_code="UZ",
-            city="Гулистан",
+            city="Ташкент",
             currency_code="UZS",
             shopping_culture="mixed",
         )
@@ -188,6 +172,9 @@ async def get_or_create_user(session: AsyncSession, tg_user: types.User) -> User
         if tg_user.username and db_user.username != (tg_user.username[:255] if tg_user.username else None):
             db_user.username = tg_user.username[:255] if tg_user.username else None
             changed = True
+        if encrypted_tg_id and db_user.telegram_id_encrypted != encrypted_tg_id:
+            db_user.telegram_id_encrypted = encrypted_tg_id
+            changed = True
         if changed:
             await session.commit()
 
@@ -195,21 +182,17 @@ async def get_or_create_user(session: AsyncSession, tg_user: types.User) -> User
 
 
 def get_effective_cart_id(user: User) -> uuid.UUID:
-    """Returns user's own ID or their shared family cart ID."""
     return user.family_cart_id if user.family_cart_id else user.id
 
 
-# ── Helper: Render In-Chat Checklist ────────────────────────────────────────
+# ── Checklist Renderer ──────────────────────────────────────────────────────
 
 async def render_checklist_message(
     session: AsyncSession, db_user: User, webapp_url: str
 ) -> tuple[str, InlineKeyboardMarkup]:
-    """
-    Renders shopping list grouped by bazaar aisles with clear emojis for instant
-    glance reading while walking in the market.
-    """
     cart_id = get_effective_cart_id(db_user)
     is_family = bool(db_user.family_cart_id)
+    lang = db_user.language_code or "ru"
 
     result = await session.execute(
         select(PurchaseHistory)
@@ -224,30 +207,23 @@ async def render_checklist_message(
     items = result.scalars().all()
 
     if not items:
-        family_tag = " 👥 <i>(Семейная корзина)</i>" if is_family else ""
-        text = (
-            f"📋 <b>Ваш список покупок пуст</b>{family_tag}\n\n"
-            f"⚡️ <b>Как добавить товары:</b>\n"
-            f"• 🎙 Надиктуйте голосовое: <i>«Купи 2 кг говядины и 3 лепешки»</i>\n"
-            f"• 📝 Отправьте любой текст или скопируйте из <b>Заметок</b>\n"
-            f"• 🍲 Скиньте рецепт для расчета ингредиентов\n"
-            f"• Или нажмите кнопку <b>«🛒 Добавить регулярные»</b> ниже"
-        )
+        family_tag = t("family_cart_badge", lang) if is_family else ""
+        text = t("empty_list", lang) + family_tag
         kb = InlineKeyboardMarkup(
             inline_keyboard=[
                 [
                     InlineKeyboardButton(
-                        text="🛒 Добавить регулярные товары",
+                        text=t("add_staples", lang),
                         callback_data="add_staples_quick",
                     )
                 ],
                 [
                     InlineKeyboardButton(
-                        text="🔗 Поделиться с семьей",
+                        text=t("share", lang),
                         callback_data="share_family_cart",
                     ),
                     InlineKeyboardButton(
-                        text="🚀 В приложение",
+                        text=t("open_webapp", lang),
                         web_app=WebAppInfo(url=webapp_url),
                     ),
                 ],
@@ -259,18 +235,17 @@ async def render_checklist_message(
     purchased_items = [i for i in items if i.is_purchased]
 
     total_est = sum(float(i.price_paid or 0) for i in pending_items)
-    family_header = " 👥 Семейная корзина" if is_family else " 📍 Базар Гулистан"
+    family_header = t("family_cart_badge", lang) if is_family else ""
 
     lines = [
-        f"📋 <b>Список покупок</b>{family_header}",
-        f"Осталось купить: <b>{len(pending_items)}</b> | В корзине: {len(purchased_items)}",
+        f"{t('checklist_title', lang)}{family_header}",
+        t("items_remaining", lang, pending=len(pending_items), purchased=len(purchased_items)),
     ]
     if total_est > 0:
-        lines.append(f"💰 Сумма: <b>{total_est:,.0f}</b> сум\n")
+        lines.append(f"{t('total_estimate', lang, total=f'{total_est:,.0f}')}\n")
     else:
         lines.append("")
 
-    # Group pending items by bazaar aisles
     grouped: dict[str, list[PurchaseHistory]] = {}
     for it in pending_items:
         cat = it.category or "🥫 Бакалея и специи"
@@ -297,18 +272,18 @@ async def render_checklist_message(
         lines.append("")
 
     if purchased_items:
-        lines.append("<b>✅ Уже куплено:</b>")
+        lines.append(t("purchased_section", lang))
         for pit in purchased_items[:6]:
             lines.append(f"  <s>[x] {escape_html(pit.item_name)}</s>")
 
     action_row = [
-        InlineKeyboardButton(text="🔗 Поделиться", callback_data="share_family_cart"),
-        InlineKeyboardButton(text="🗑 Очистить купленное", callback_data="chk_clear_done"),
+        InlineKeyboardButton(text=t("share", lang), callback_data="share_family_cart"),
+        InlineKeyboardButton(text=t("clear_done", lang), callback_data="chk_clear_done"),
     ]
     inline_rows.append(action_row)
     inline_rows.append([
         InlineKeyboardButton(
-            text="🚀 Открыть приложение (iOS 26)",
+            text=t("open_webapp", lang),
             web_app=WebAppInfo(url=webapp_url),
         )
     ])
@@ -319,8 +294,7 @@ async def render_checklist_message(
 # ── /start Handler ──────────────────────────────────────────────────────────
 
 @router.message(CommandStart())
-async def cmd_start(message: Message, command: CommandObject, db_session: Any, state: FSMContext) -> None:
-    """Welcome handler supporting direct /start and deep-linked /start cart_<uuid>."""
+async def cmd_start(message: Message, command: CommandObject, db_session: Any, state: FSMContext, bot: Bot) -> None:
     await state.clear()
     settings = get_settings()
     user = message.from_user
@@ -332,108 +306,172 @@ async def cmd_start(message: Message, command: CommandObject, db_session: Any, s
     webapp_url = settings.telegram_webapp_url.rstrip("/")
     user_lang = user.language_code or "ru"
 
-    # Check deep-link argument (e.g. cart_a1b2c3d4-...)
+    # Secure deep-link argument with owner approval and rate limit
     if command.args and command.args.startswith("cart_"):
+        if not _check_join_rate_limit(user.id):
+            await message.answer(t("family_rate_limit", user_lang))
+            return
+
         target_cart_id_str = command.args.replace("cart_", "").strip()
         try:
             target_uuid = uuid.UUID(target_cart_id_str)
-            db_user.family_cart_id = target_uuid
-            await session.commit()
-            await message.answer(
-                "🎉 <b>Вы подключились к семейной корзине!</b>\n\n"
-                "Теперь ваши списки покупок синхронизированы. Все добавления и вычеркивания "
-                "отображаются у всех участников в реальном времени.",
-                parse_mode=ParseMode.HTML,
-            )
-        except Exception as exc:
+            if target_uuid != db_user.id:
+                target_user = await session.get(User, target_uuid)
+                if target_user is not None:
+                    owner_chat_id = (
+                        decrypt_telegram_id(target_user.telegram_id_encrypted, settings.secret_key)
+                        if target_user.telegram_id_encrypted and settings.secret_key
+                        else None
+                    )
+                    if owner_chat_id:
+                        approval_kb = InlineKeyboardMarkup(
+                            inline_keyboard=[
+                                [
+                                    InlineKeyboardButton(
+                                        text=t("approve", target_user.language_code),
+                                        callback_data=f"cart_appr:{target_uuid}:{db_user.id}",
+                                    ),
+                                    InlineKeyboardButton(
+                                        text=t("deny", target_user.language_code),
+                                        callback_data=f"cart_deny:{target_uuid}:{db_user.id}",
+                                    ),
+                                ]
+                            ]
+                        )
+                        requester_name = escape_html(user.first_name or "Пользователь")
+                        if user.username:
+                            requester_name += f" (@{escape_html(user.username)})"
+                        try:
+                            await bot.send_message(
+                                chat_id=owner_chat_id,
+                                text=t("family_join_request_owner", target_user.language_code, requester=requester_name),
+                                reply_markup=approval_kb,
+                                parse_mode=ParseMode.HTML,
+                            )
+                            await message.answer(t("family_join_request_sent", user_lang), parse_mode=ParseMode.HTML)
+                        except Exception as exc:
+                            logger.warning("Could not send join request to owner: %s", exc)
+                            db_user.family_cart_id = target_uuid
+                            await session.commit()
+                            await message.answer(t("family_join_approved_member", user_lang), parse_mode=ParseMode.HTML)
+                    else:
+                        db_user.family_cart_id = target_uuid
+                        await session.commit()
+                        await message.answer(t("family_join_approved_member", user_lang), parse_mode=ParseMode.HTML)
+        except (ValueError, TypeError) as exc:
             logger.warning("Invalid family cart deep-link: %s", exc)
 
     safe_first_name = escape_html(user.first_name or "Пользователь")
+    welcome_text = t("welcome", user_lang, name=safe_first_name)
 
-    if user_lang.startswith("uz"):
-        welcome_text = (
-            f"👋 Assalomu alaykum, <b>{safe_first_name}</b>!\n\n"
-            f"<b>OmniCart AI</b> — Guliston bozori va do'konlari uchun aqlli xarid yordamchisi.\n\n"
-            f"⚡️ <b>Imkoniyatlar:</b>\n"
-            f"• 🎙 <b>Ovozli xabar</b> — xaridlarni ovoz orqali aytib bering\n"
-            f"• 📝 <b>Matn kiritish</b> — xaridlar ro'yxatini yoki retseptni yuboring\n"
-            f"• 📊 <b>Bozor narxlari</b> — Guliston Dehqon Bozori narxlarini ko'rish\n"
-            f"• 👥 <b>Oilaviy savat</b> — birgalikda bozor qilish"
-        )
-    else:
-        welcome_text = (
-            f"👋 Здравствуйте, <b>{safe_first_name}</b>!\n\n"
-            f"Я — ваш умный ассистент покупок <b>OmniCart AI</b> для рынка и магазинов "
-            f"<b>Гулистана</b>.\n\n"
-            f"⚡️ <b>Быстрые возможности:</b>\n"
-            f"• 🎙 <b>Голосовой ввод</b> — надиктуйте товары голосом\n"
-            f"• 📝 <b>Любой текст</b> — скопируйте список из Заметок, я сам всё разберу\n"
-            f"• 🍲 <b>Рецепты</b> — пришлите рецепт, я вытащу граммовки на нужное число персон\n"
-            f"• 👥 <b>Семейная корзина</b> — ходите на базар вместе с одного списка"
-        )
-
-    reply_kb = get_main_reply_keyboard(webapp_url)
+    reply_kb = get_main_reply_keyboard(webapp_url, user_lang)
     chk_text, chk_kb = await render_checklist_message(session, db_user, webapp_url)
 
     await message.answer(welcome_text, reply_markup=reply_kb, parse_mode=ParseMode.HTML)
     await message.answer(chk_text, reply_markup=chk_kb, parse_mode=ParseMode.HTML)
 
 
-# ── Market Overview Handler ─────────────────────────────────────────────────
+# ── Family Cart Approval Callbacks ──────────────────────────────────────────
 
-@router.callback_query(F.data == "view_guliston_market")
-async def handle_market_overview(callback: CallbackQuery) -> None:
-    """Shows curated market overview for Guliston bazaar with safe update handling."""
-    await callback.answer()
+@router.callback_query(F.data.startswith("cart_appr:"))
+async def cb_approve_join(callback: CallbackQuery, db_session: Any, bot: Bot) -> None:
+    session: AsyncSession = db_session
+    user = callback.from_user
+    if not user:
+        return
+    db_user = await get_or_create_user(session, user)
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        return
+    cart_uuid_str, requester_uuid_str = parts[1], parts[2]
 
-    overview_text = (
-        "📊 <b>Сводка цен: Рынок 'Гулистон Деҳқон Бозори'</b>\n\n"
-        "• <i>Говядина (мякоть):</i> 85 000 – 95 000 сум/кг\n"
-        "• <i>Баранина свежая:</i> 95 000 – 110 000 сум/кг\n"
-        "• <i>Куриное филе:</i> 42 000 – 48 000 сум/кг\n"
-        "• <i>Картофель (красный):</i> 4 000 – 5 500 сум/кг\n"
-        "• <i>Лук репчатый:</i> 2 500 – 3 500 сум/кг\n"
-        "• <i>Морковь желтая (для плова):</i> 3 000 – 4 000 сум/кг\n"
-        "• <i>Рис Лазер (отборный):</i> 24 000 – 28 000 сум/кг\n"
-        "• <i>Хлопковое масло:</i> 17 000 – 19 500 сум/л\n"
-        "• <i>Лепешка тандырная:</i> 4 000 – 4 500 сум/шт\n\n"
-        "<i>💡 Цены обновлены и рассчитаны алгоритмом медианы цен по рынку.</i>"
-    )
-
-    back_keyboard = InlineKeyboardMarkup(
-        inline_keyboard=[
-            [InlineKeyboardButton(text="🔄 Обновить сводку", callback_query_data="view_guliston_market")],
-            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_query_data="back_to_main_menu")],
-        ]
-    )
+    # Verify that caller is the owner of the cart
+    if str(db_user.id) != cart_uuid_str and str(db_user.family_cart_id) != cart_uuid_str:
+        await callback.answer("У вас нет прав на управление этой корзиной", show_alert=True)
+        return
 
     try:
-        if callback.message:
-            await callback.message.edit_text(
-                text=overview_text,
-                parse_mode=ParseMode.HTML,
-                reply_markup=back_keyboard,
-            )
-    except TelegramBadRequest as exc:
-        if "message is not modified" in str(exc).lower():
-            logger.debug("Market overview not modified, safely ignored.")
-        else:
-            logger.error("Error updating market overview: %s", exc)
+        requester_uuid = uuid.UUID(requester_uuid_str)
+        cart_uuid = uuid.UUID(cart_uuid_str)
+        requester = await session.get(User, requester_uuid)
+        if requester:
+            requester.family_cart_id = cart_uuid
+            await session.commit()
 
+            if requester.telegram_id_encrypted:
+                settings = get_settings()
+                req_chat_id = decrypt_telegram_id(requester.telegram_id_encrypted, settings.secret_key)
+                if req_chat_id:
+                    try:
+                        await bot.send_message(
+                            chat_id=req_chat_id,
+                            text=t("family_join_approved_member", requester.language_code),
+                            parse_mode=ParseMode.HTML,
+                        )
+                    except Exception as e:
+                        logger.warning("Could not notify requester of approval: %s", e)
+
+            req_name = escape_html(requester.first_name or "Пользователь")
+            owner_text = t("family_join_approved_owner", db_user.language_code, requester=req_name)
+            await callback.answer()
+            if callback.message:
+                await callback.message.edit_text(owner_text, parse_mode=ParseMode.HTML)
+    except Exception as exc:
+        logger.exception("Error approving cart join: %s", exc)
+        await callback.answer("Ошибка обработки запроса")
+
+
+@router.callback_query(F.data.startswith("cart_deny:"))
+async def cb_deny_join(callback: CallbackQuery, db_session: Any, bot: Bot) -> None:
+    session: AsyncSession = db_session
+    user = callback.from_user
+    if not user:
+        return
+    db_user = await get_or_create_user(session, user)
+    parts = callback.data.split(":")
+    if len(parts) != 3:
+        return
+    cart_uuid_str, requester_uuid_str = parts[1], parts[2]
+
+    if str(db_user.id) != cart_uuid_str and str(db_user.family_cart_id) != cart_uuid_str:
+        await callback.answer("У вас нет прав на управление этой корзиной", show_alert=True)
+        return
+
+    try:
+        requester_uuid = uuid.UUID(requester_uuid_str)
+        requester = await session.get(User, requester_uuid)
+        if requester and requester.telegram_id_encrypted:
+            settings = get_settings()
+            req_chat_id = decrypt_telegram_id(requester.telegram_id_encrypted, settings.secret_key)
+            if req_chat_id:
+                try:
+                    await bot.send_message(
+                        chat_id=req_chat_id,
+                        text=t("family_join_denied_member", requester.language_code),
+                        parse_mode=ParseMode.HTML,
+                    )
+                except Exception as e:
+                    logger.warning("Could not notify requester of denial: %s", e)
+
+        owner_text = t("family_join_denied_owner", db_user.language_code)
+        await callback.answer()
+        if callback.message:
+            await callback.message.edit_text(owner_text, parse_mode=ParseMode.HTML)
+    except Exception as exc:
+        logger.exception("Error denying cart join: %s", exc)
+        await callback.answer("Ошибка обработки запроса")
+
+
+# ── Help & Back Callbacks ────────────────────────────────────────────────────
 
 @router.callback_query(F.data == "view_bot_help")
 async def handle_bot_help(callback: CallbackQuery) -> None:
     await callback.answer()
-    help_text = (
-        "ℹ️ <b>Справка по боту OmniCart AI:</b>\n\n"
-        "• Отправьте аудиозапись (голосовое) для мгновенного добавления в список.\n"
-        "• Скопируйте любой текст или рецепт в чат — нейросеть выделит нужные продукты.\n"
-        "• Нажмите <b>«🚀 Открыть приложение»</b> для интерактивного чек-листа и сравнения цен.\n"
-        "• Нажмите <b>«🔗 Поделиться»</b>, чтобы синхронизировать корзину с членами семьи."
-    )
+    user_lang = callback.from_user.language_code or "ru" if callback.from_user else "ru"
+    help_text = t("help_text", user_lang)
     back_kb = InlineKeyboardMarkup(
         inline_keyboard=[
-            [InlineKeyboardButton(text="⬅️ Назад в меню", callback_data="back_to_main_menu")]
+            [InlineKeyboardButton(text=t("back_to_menu", user_lang), callback_data="back_to_main_menu")]
         ]
     )
     try:
@@ -465,7 +503,9 @@ async def handle_back_to_menu(callback: CallbackQuery, db_session: Any) -> None:
 @router.callback_query(F.data == "cancel_action")
 async def handle_cancel_action(callback: CallbackQuery, state: FSMContext, db_session: Any) -> None:
     await state.clear()
-    await callback.answer("Действие отменено.")
+    lang = callback.from_user.language_code or "ru" if callback.from_user else "ru"
+    cancel_msg = t("action_cancelled", lang)
+    await callback.answer(cancel_msg)
     if not callback.message or not callback.from_user:
         return
 
@@ -476,7 +516,7 @@ async def handle_cancel_action(callback: CallbackQuery, state: FSMContext, db_se
     text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
     try:
         await callback.message.edit_text(
-            f"❌ Действие отменено.\n\n{text}",
+            f"{cancel_msg}\n\n{text}",
             parse_mode=ParseMode.HTML,
             reply_markup=kb,
         )
@@ -487,7 +527,7 @@ async def handle_cancel_action(callback: CallbackQuery, state: FSMContext, db_se
 
 # ── Quick Bottom Menu Actions ────────────────────────────────────────────────
 
-@router.message(F.text.in_({"📋 Мой список", "📋 Чек-лист покупок"}))
+@router.message(F.text.in_({"📋 Мой список", "📋 Mening ro'yxatim", "📋 My checklist", "📋 Чек-лист покупок"}))
 async def msg_show_checklist(message: Message, db_session: Any) -> None:
     session: AsyncSession = db_session
     user = message.from_user
@@ -500,7 +540,7 @@ async def msg_show_checklist(message: Message, db_session: Any) -> None:
     await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
-@router.message(F.text.in_({"🛒 Добавить регулярные", "💡 Регулярные товары"}))
+@router.message(F.text.in_({"🛒 Добавить регулярные", "🛒 Doimiy mahsulotlar", "🛒 Add staples", "🛒 Регулярные товары", "💡 Регулярные товары"}))
 async def msg_add_staples(message: Message, db_session: Any) -> None:
     session: AsyncSession = db_session
     user = message.from_user
@@ -508,13 +548,14 @@ async def msg_add_staples(message: Message, db_session: Any) -> None:
         return
     db_user = await get_or_create_user(session, user)
     cart_id = get_effective_cart_id(db_user)
+    lang = user.language_code or "ru"
 
     staples = [
         {"name": "Говядина мякоть", "qty": 1.5, "unit": "кг", "category": "🥩 Мясной отдел", "price": 135000},
-        {"name": "Картофель красный", "qty": 4.0, "unit": "кг", "category": "🥦 Овощные ряды", "price": 16000},
+        {"name": "Картофель", "qty": 3.0, "unit": "кг", "category": "🥦 Овощные ряды", "price": 15000},
         {"name": "Лук репчатый", "qty": 2.0, "unit": "кг", "category": "🥦 Овощные ряды", "price": 6000},
-        {"name": "Масло хлопковое 2л", "qty": 1.0, "unit": "бут", "category": "🥫 Бакалея и специи", "price": 37000},
-        {"name": "Лепешки тандырные", "qty": 3.0, "unit": "шт", "category": "🍞 Лепешки и выпечка", "price": 12000},
+        {"name": "Масло растительное", "qty": 1.0, "unit": "л", "category": "🥫 Бакалея и специи", "price": 19000},
+        {"name": "Хлеб / Лепешки", "qty": 2.0, "unit": "шт", "category": "🍞 Лепешки и выпечка", "price": 8000},
     ]
 
     added = 0
@@ -530,7 +571,7 @@ async def msg_add_staples(message: Message, db_session: Any) -> None:
             price_paid=Decimal(str(s["price"])),
             currency_code="UZS",
             country_code="UZ",
-            city="Гулистан",
+            city="Ташкент",
             is_purchased=False,
         )
         session.add(p)
@@ -540,7 +581,7 @@ async def msg_add_staples(message: Message, db_session: Any) -> None:
     settings = get_settings()
     text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
 
-    await message.answer(f"✅ Добавлено <b>{added}</b> регулярных товаров для дома!", parse_mode=ParseMode.HTML)
+    await message.answer(t("staples_added", lang, count=added), parse_mode=ParseMode.HTML)
     await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
 
@@ -548,7 +589,6 @@ async def msg_add_staples(message: Message, db_session: Any) -> None:
 
 @router.message(F.voice | F.audio)
 async def handle_voice_message(message: Message, db_session: Any, bot: Bot) -> None:
-    """Transcribes voice notes using Whisper and parses items through Universal AI Parser."""
     user = message.from_user
     if not user:
         return
@@ -556,8 +596,9 @@ async def handle_voice_message(message: Message, db_session: Any, bot: Bot) -> N
     session: AsyncSession = db_session
     db_user = await get_or_create_user(session, user)
     cart_id = get_effective_cart_id(db_user)
+    lang = user.language_code or "ru"
 
-    status_msg = await message.answer("🎙 <i>Слушаю и распознаю голосовое...</i>", parse_mode=ParseMode.HTML)
+    status_msg = await message.answer(t("voice_processing", lang), parse_mode=ParseMode.HTML)
 
     try:
         file_id = message.voice.file_id if message.voice else message.audio.file_id
@@ -570,7 +611,7 @@ async def handle_voice_message(message: Message, db_session: Any, bot: Bot) -> N
             transcription = await client.transcribe_audio(audio_data, filename="voice.ogg")
 
         if not transcription:
-            await status_msg.edit_text("❌ Не удалось разобрать аудио. Попробуйте наговорить четче или напишите текстом.")
+            await status_msg.edit_text(t("voice_empty", lang))
             return
 
         safe_transcript = escape_html(transcription)
@@ -579,7 +620,7 @@ async def handle_voice_message(message: Message, db_session: Any, bot: Bot) -> N
         parse_result = await UniversalAIParser.parse_any_text(transcription)
 
         if not parse_result.items:
-            await status_msg.edit_text(f"🤔 Распознано: «{safe_transcript}», но товары не найдены. Назовите продукты.")
+            await status_msg.edit_text(t("voice_no_items", lang, transcript=safe_transcript))
             return
 
         for it in parse_result.items:
@@ -594,7 +635,7 @@ async def handle_voice_message(message: Message, db_session: Any, bot: Bot) -> N
                 price_paid=Decimal(str(it.estimated_price)),
                 currency_code="UZS",
                 country_code="UZ",
-                city="Гулистан",
+                city="Ташкент",
                 is_purchased=False,
             )
             session.add(p)
@@ -603,19 +644,18 @@ async def handle_voice_message(message: Message, db_session: Any, bot: Bot) -> N
         settings = get_settings()
         text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
 
-        await status_msg.edit_text(f"✅ Добавлено из голоса: <b>{len(parse_result.items)}</b> поз.", parse_mode=ParseMode.HTML)
+        await status_msg.edit_text(t("voice_added", lang, count=len(parse_result.items)), parse_mode=ParseMode.HTML)
         await message.answer(text, reply_markup=kb, parse_mode=ParseMode.HTML)
 
     except Exception as exc:
         logger.exception("Voice handling error: %s", exc)
-        await status_msg.edit_text("❌ Ошибка при обработке аудио. Попробуйте отправить текстом.")
+        await status_msg.edit_text(t("voice_error", lang))
 
 
 # ── Text & Recipe Handler ────────────────────────────────────────────────────
 
 @router.message(F.text & ~F.text.startswith("/"))
 async def handle_text_or_recipe(message: Message, db_session: Any) -> None:
-    """Universal handler for free text, copied notes, and recipe links/texts."""
     user = message.from_user
     text = message.text
     if not user or not text:
@@ -624,13 +664,14 @@ async def handle_text_or_recipe(message: Message, db_session: Any) -> None:
     session: AsyncSession = db_session
     db_user = await get_or_create_user(session, user)
     cart_id = get_effective_cart_id(db_user)
+    lang = user.language_code or "ru"
 
     is_recipe = any(
         w in text.lower()
         for w in ["рецепт", "ингредиент", "порци", "приготовлени", "youtube.com", "youtu.be", "плов", "шурпа", "лагман", "манты"]
     )
 
-    status_msg = await message.answer("✨ <i>Разбираю запись нейросетью...</i>", parse_mode=ParseMode.HTML)
+    status_msg = await message.answer(t("text_processing", lang), parse_mode=ParseMode.HTML)
 
     try:
         if is_recipe:
@@ -639,7 +680,7 @@ async def handle_text_or_recipe(message: Message, db_session: Any) -> None:
             parse_result = await UniversalAIParser.parse_any_text(text)
 
         if not parse_result.items:
-            await status_msg.edit_text("🤔 Не удалось распознать товары. Напишите продукты, например: «картошка 2кг, мясо 1кг».")
+            await status_msg.edit_text(t("text_no_items", lang))
             return
 
         added_count = 0
@@ -655,7 +696,7 @@ async def handle_text_or_recipe(message: Message, db_session: Any) -> None:
                 price_paid=Decimal(str(it.estimated_price)),
                 currency_code="UZS",
                 country_code="UZ",
-                city="Гулистан",
+                city="Ташкент",
                 is_purchased=False,
             )
             session.add(p)
@@ -666,7 +707,7 @@ async def handle_text_or_recipe(message: Message, db_session: Any) -> None:
         chk_text, chk_kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
 
         tag = "по рецепту" if is_recipe else "в список"
-        await status_msg.edit_text(f"✅ Добавлено {tag}: <b>{added_count}</b> позиций!", parse_mode=ParseMode.HTML)
+        await status_msg.edit_text(t("text_added", lang, tag=tag, count=added_count), parse_mode=ParseMode.HTML)
         await message.answer(chk_text, reply_markup=chk_kb, parse_mode=ParseMode.HTML)
 
     except Exception as exc:
@@ -715,15 +756,16 @@ async def cb_clear_done(callback: CallbackQuery, db_session: Any) -> None:
     user = callback.from_user
     db_user = await get_or_create_user(session, user)
     cart_id = get_effective_cart_id(db_user)
+    lang = user.language_code or "ru"
 
     await session.execute(
         delete(PurchaseHistory).where(
             PurchaseHistory.user_id == cart_id,
-            PurchaseHistory.is_purchased == True,
+            PurchaseHistory.is_purchased == True,  # noqa: E712
         )
     )
     await session.commit()
-    await callback.answer("Купленные товары удалены!")
+    await callback.answer(t("items_cleared", lang))
 
     settings = get_settings()
     text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
@@ -740,15 +782,11 @@ async def cb_share_family(callback: CallbackQuery, db_session: Any) -> None:
     session: AsyncSession = db_session
     user = callback.from_user
     db_user = await get_or_create_user(session, user)
+    lang = user.language_code or "ru"
 
     share_link = f"https://t.me/gusop_bot?start=cart_{str(db_user.id)}"
+    msg = t("family_share_msg", lang, link=share_link)
 
-    msg = (
-        "🔗 <b>Ссылка на вашу семейную корзину:</b>\n\n"
-        f"<code>{share_link}</code>\n\n"
-        "Отправьте эту ссылку супругу(е) или родственникам. При переходе их список "
-        "автоматически объединится с вашим в реальном времени!"
-    )
     await callback.answer()
     if callback.message:
         await callback.message.answer(msg, parse_mode=ParseMode.HTML)
@@ -760,13 +798,14 @@ async def cb_add_staples_quick(callback: CallbackQuery, db_session: Any) -> None
     user = callback.from_user
     db_user = await get_or_create_user(session, user)
     cart_id = get_effective_cart_id(db_user)
+    lang = user.language_code or "ru"
 
     staples = [
         ("Говядина мякоть", 1.5, "кг", "🥩 Мясной отдел", 135000),
-        ("Картофель красный", 3.0, "кг", "🥦 Овощные ряды", 12000),
+        ("Картофель", 3.0, "кг", "🥦 Овощные ряды", 15000),
         ("Лук репчатый", 2.0, "кг", "🥦 Овощные ряды", 6000),
-        ("Масло хлопковое", 1.0, "л", "🥫 Бакалея и специи", 18500),
-        ("Лепешки тандырные", 2.0, "шт", "🍞 Лепешки и выпечка", 8000),
+        ("Масло растительное", 1.0, "л", "🥫 Бакалея и специи", 19000),
+        ("Хлеб / Лепешки", 2.0, "шт", "🍞 Лепешки и выпечка", 8000),
     ]
 
     for name, qty, unit, cat, price in staples:
@@ -781,13 +820,13 @@ async def cb_add_staples_quick(callback: CallbackQuery, db_session: Any) -> None
             price_paid=Decimal(str(price)),
             currency_code="UZS",
             country_code="UZ",
-            city="Гулистан",
+            city="Ташкент",
             is_purchased=False,
         )
         session.add(p)
 
     await session.commit()
-    await callback.answer("Базовые товары добавлены!")
+    await callback.answer(t("staples_added", lang, count=len(staples)))
 
     settings = get_settings()
     text, kb = await render_checklist_message(session, db_user, settings.telegram_webapp_url)
@@ -796,4 +835,4 @@ async def cb_add_staples_quick(callback: CallbackQuery, db_session: Any) -> None
             await callback.message.edit_text(text, reply_markup=kb, parse_mode=ParseMode.HTML)
         except TelegramBadRequest as exc:
             if "message is not modified" not in str(exc).lower():
-                logger.error("Error editing staples quick message: %s", exc)
+                logger.error("Error editing staples message: %s", exc)

@@ -1,7 +1,6 @@
 """
-OmniCart AI — Daily Price Cron Parser & Fast Redis Cache.
-Collects and caches live prices for Guliston (Bazaar vs Supermarket / Uzum Tezkor).
-Provides sub-15ms autocompletion directly from Upstash Redis.
+OmniCart AI — Daily Price Cache & Autocompletion Service.
+Caches local market prices in Redis for sub-15ms autocompletion.
 """
 
 from __future__ import annotations
@@ -13,40 +12,40 @@ import redis.asyncio as aioredis
 
 logger = logging.getLogger(__name__)
 
-REDIS_PRICE_KEY = "market:prices:guliston"
+REDIS_PRICE_KEY = "market:prices:local"
 
-# Baseline market catalog for Guliston & Syrdarya (updated daily via cron)
-DEFAULT_GULISTON_PRICES: list[dict[str, Any]] = [
-    {"name": "Говядина (мякоть)", "price": 95000, "bazaar_price": 90000, "korzinka_price": 105000, "unit": "кг", "category": "🥩 Мясной отдел"},
-    {"name": "Баранина свежая", "price": 105000, "bazaar_price": 100000, "korzinka_price": 115000, "unit": "кг", "category": "🥩 Мясной отдел"},
-    {"name": "Фарш говяжий", "price": 85000, "bazaar_price": 80000, "korzinka_price": 95000, "unit": "кг", "category": "🥩 Мясной отдел"},
-    {"name": "Куриное филе", "price": 42000, "bazaar_price": 40000, "korzinka_price": 46000, "unit": "кг", "category": "🥩 Мясной отдел"},
-    {"name": "Картофель красный", "price": 4500, "bazaar_price": 4000, "korzinka_price": 5500, "unit": "кг", "category": "🥦 Овощные ряды"},
-    {"name": "Лук репчатый", "price": 3500, "bazaar_price": 3000, "korzinka_price": 4500, "unit": "кг", "category": "🥦 Овощные ряды"},
-    {"name": "Морковь желтая (для плова)", "price": 3500, "bazaar_price": 3000, "korzinka_price": 4800, "unit": "кг", "category": "🥦 Овощные ряды"},
-    {"name": "Морковь красная", "price": 3500, "bazaar_price": 3000, "korzinka_price": 4500, "unit": "кг", "category": "🥦 Овощные ряды"},
-    {"name": "Помидоры розовые", "price": 18000, "bazaar_price": 15000, "korzinka_price": 22000, "unit": "кг", "category": "🥦 Овощные ряды"},
-    {"name": "Огурцы тепличные", "price": 14000, "bazaar_price": 12000, "korzinka_price": 17000, "unit": "кг", "category": "🥦 Овощные ряды"},
-    {"name": "Чеснок головка", "price": 28000, "bazaar_price": 25000, "korzinka_price": 32000, "unit": "кг", "category": "🥦 Овощные ряды"},
-    {"name": "Зелень ассорти (кинза, укроп)", "price": 2500, "bazaar_price": 2000, "korzinka_price": 4000, "unit": "пучок", "category": "🥦 Овощные ряды"},
-    {"name": "Рис Лазер (элитный)", "price": 26000, "bazaar_price": 24000, "korzinka_price": 30000, "unit": "кг", "category": "🥫 Бакалея и специи"},
-    {"name": "Рис Аланга", "price": 19000, "bazaar_price": 17000, "korzinka_price": 21500, "unit": "кг", "category": "🥫 Бакалея и специи"},
-    {"name": "Рис Девзира", "price": 32000, "bazaar_price": 30000, "korzinka_price": 36000, "unit": "кг", "category": "🥫 Бакалея и специи"},
-    {"name": "Масло хлопковое (Олтин Калит)", "price": 18500, "bazaar_price": 17500, "korzinka_price": 21000, "unit": "л", "category": "🥫 Бакалея и специи"},
-    {"name": "Масло подсолнечное (Щедрое лето)", "price": 22000, "bazaar_price": 21000, "korzinka_price": 23500, "unit": "л", "category": "🥫 Бакалея и специи"},
-    {"name": "Мука 1 сорт (Казахстан)", "price": 7500, "bazaar_price": 7000, "korzinka_price": 8500, "unit": "кг", "category": "🥫 Бакалея и специи"},
-    {"name": "Сахар песок", "price": 13500, "bazaar_price": 13000, "korzinka_price": 14500, "unit": "кг", "category": "🥫 Бакалея и специи"},
-    {"name": "Чай зеленый 95", "price": 12000, "bazaar_price": 10000, "korzinka_price": 15000, "unit": "пачка", "category": "🥫 Бакалея и специи"},
-    {"name": "Зира иранская (специи)", "price": 18000, "bazaar_price": 15000, "korzinka_price": 24000, "unit": "пачка", "category": "🥫 Бакалея и специи"},
-    {"name": "Нут (горох для плова)", "price": 22000, "bazaar_price": 20000, "korzinka_price": 26000, "unit": "кг", "category": "🥫 Бакалея и специи"},
-    {"name": "Лепешка тандырная (нон)", "price": 4000, "bazaar_price": 4000, "korzinka_price": 4500, "unit": "шт", "category": "🍞 Лепешки и выпечка"},
-    {"name": "Паттыр самаркандский", "price": 12000, "bazaar_price": 10000, "korzinka_price": 14000, "unit": "шт", "category": "🍞 Лепешки и выпечка"},
-    {"name": "Молоко 3.2% (1л)", "price": 11000, "bazaar_price": 9000, "korzinka_price": 12500, "unit": "л", "category": "🥛 Молочные ряды"},
-    {"name": "Катык (кефир домашний)", "price": 8000, "bazaar_price": 7000, "korzinka_price": 10000, "unit": "л", "category": "🥛 Молочные ряды"},
-    {"name": "Сметана 20% (домашняя)", "price": 32000, "bazaar_price": 28000, "korzinka_price": 36000, "unit": "кг", "category": "🥛 Молочные ряды"},
-    {"name": "Яйца домашние (10 шт)", "price": 17000, "bazaar_price": 16000, "korzinka_price": 19000, "unit": "дес", "category": "🥛 Молочные ряды"},
-    {"name": "Стиральный порошок (3кг)", "price": 68000, "bazaar_price": 68000, "korzinka_price": 64000, "unit": "пачка", "category": "🧼 Бытовая химия"},
-    {"name": "Средство Fairy (1л)", "price": 24000, "bazaar_price": 25000, "korzinka_price": 22500, "unit": "шт", "category": "🧼 Бытовая химия"},
+# Baseline market catalog (updated daily via cron)
+DEFAULT_LOCAL_PRICES: list[dict[str, Any]] = [
+    {"name": "Говядина (мякоть)", "price": 95000, "bazaar_price": 90000, "supermarket_price": 105000, "unit": "кг", "category": "🥩 Мясной отдел"},
+    {"name": "Баранина свежая", "price": 105000, "bazaar_price": 100000, "supermarket_price": 115000, "unit": "кг", "category": "🥩 Мясной отдел"},
+    {"name": "Фарш говяжий", "price": 85000, "bazaar_price": 80000, "supermarket_price": 95000, "unit": "кг", "category": "🥩 Мясной отдел"},
+    {"name": "Куриное филе", "price": 42000, "bazaar_price": 40000, "supermarket_price": 46000, "unit": "кг", "category": "🥩 Мясной отдел"},
+    {"name": "Картофель красный", "price": 4500, "bazaar_price": 4000, "supermarket_price": 5500, "unit": "кг", "category": "🥦 Овощные ряды"},
+    {"name": "Лук репчатый", "price": 3500, "bazaar_price": 3000, "supermarket_price": 4500, "unit": "кг", "category": "🥦 Овощные ряды"},
+    {"name": "Морковь желтая (для плова)", "price": 3500, "bazaar_price": 3000, "supermarket_price": 4800, "unit": "кг", "category": "🥦 Овощные ряды"},
+    {"name": "Морковь красная", "price": 3500, "bazaar_price": 3000, "supermarket_price": 4500, "unit": "кг", "category": "🥦 Овощные ряды"},
+    {"name": "Помидоры розовые", "price": 18000, "bazaar_price": 15000, "supermarket_price": 22000, "unit": "кг", "category": "🥦 Овощные ряды"},
+    {"name": "Огурцы тепличные", "price": 14000, "bazaar_price": 12000, "supermarket_price": 17000, "unit": "кг", "category": "🥦 Овощные ряды"},
+    {"name": "Чеснок головка", "price": 28000, "bazaar_price": 25000, "supermarket_price": 32000, "unit": "кг", "category": "🥦 Овощные ряды"},
+    {"name": "Зелень ассорти (кинза, укроп)", "price": 2500, "bazaar_price": 2000, "supermarket_price": 4000, "unit": "пучок", "category": "🥦 Овощные ряды"},
+    {"name": "Рис Лазер (элитный)", "price": 26000, "bazaar_price": 24000, "supermarket_price": 30000, "unit": "кг", "category": "🥫 Бакалея и специи"},
+    {"name": "Рис Аланга", "price": 19000, "bazaar_price": 17000, "supermarket_price": 21500, "unit": "кг", "category": "🥫 Бакалея и специи"},
+    {"name": "Рис Девзира", "price": 32000, "bazaar_price": 30000, "supermarket_price": 36000, "unit": "кг", "category": "🥫 Бакалея и специи"},
+    {"name": "Масло хлопковое (Олтин Калит)", "price": 18500, "bazaar_price": 17500, "supermarket_price": 21000, "unit": "л", "category": "🥫 Бакалея и специи"},
+    {"name": "Масло подсолнечное (Щедрое лето)", "price": 22000, "bazaar_price": 21000, "supermarket_price": 23500, "unit": "л", "category": "🥫 Бакалея и специи"},
+    {"name": "Мука 1 сорт (Казахстан)", "price": 7500, "bazaar_price": 7000, "supermarket_price": 8500, "unit": "кг", "category": "🥫 Бакалея и специи"},
+    {"name": "Сахар песок", "price": 13500, "bazaar_price": 13000, "supermarket_price": 14500, "unit": "кг", "category": "🥫 Бакалея и специи"},
+    {"name": "Чай зеленый 95", "price": 12000, "bazaar_price": 10000, "supermarket_price": 15000, "unit": "пачка", "category": "🥫 Бакалея и специи"},
+    {"name": "Зира иранская (специи)", "price": 18000, "bazaar_price": 15000, "supermarket_price": 24000, "unit": "пачка", "category": "🥫 Бакалея и специи"},
+    {"name": "Нут (горох для плова)", "price": 22000, "bazaar_price": 20000, "supermarket_price": 26000, "unit": "кг", "category": "🥫 Бакалея и специи"},
+    {"name": "Лепешка тандырная (нон)", "price": 4000, "bazaar_price": 4000, "supermarket_price": 4500, "unit": "шт", "category": "🍞 Лепешки и выпечка"},
+    {"name": "Паттыр самаркандский", "price": 12000, "bazaar_price": 10000, "supermarket_price": 14000, "unit": "шт", "category": "🍞 Лепешки и выпечка"},
+    {"name": "Молоко 3.2% (1л)", "price": 11000, "bazaar_price": 9000, "supermarket_price": 12500, "unit": "л", "category": "🥛 Молочные ряды"},
+    {"name": "Катык (кефир домашний)", "price": 8000, "bazaar_price": 7000, "supermarket_price": 10000, "unit": "л", "category": "🥛 Молочные ряды"},
+    {"name": "Сметана 20% (домашняя)", "price": 32000, "bazaar_price": 28000, "supermarket_price": 36000, "unit": "кг", "category": "🥛 Молочные ряды"},
+    {"name": "Яйца домашние (10 шт)", "price": 17000, "bazaar_price": 16000, "supermarket_price": 19000, "unit": "дес", "category": "🥛 Молочные ряды"},
+    {"name": "Стиральный порошок (3кг)", "price": 68000, "bazaar_price": 68000, "supermarket_price": 64000, "unit": "пачка", "category": "🧼 Бытовая химия"},
+    {"name": "Средство Fairy (1л)", "price": 24000, "bazaar_price": 25000, "supermarket_price": 22500, "unit": "шт", "category": "🧼 Бытовая химия"},
 ]
 
 
@@ -60,9 +59,8 @@ class PriceCronService:
             return {"status": "skipped", "reason": "redis_not_configured"}
 
         try:
-            # Check existing user crowdsourced updates to preserve them
             existing_raw = await redis.get(REDIS_PRICE_KEY)
-            items_dict: dict[str, dict[str, Any]] = {p["name"].lower(): p for p in DEFAULT_GULISTON_PRICES}
+            items_dict: dict[str, dict[str, Any]] = {p["name"].lower(): p for p in DEFAULT_LOCAL_PRICES}
 
             if existing_raw:
                 try:
@@ -72,15 +70,15 @@ class PriceCronService:
                         if name_key in items_dict and ei.get("crowdsourced"):
                             items_dict[name_key]["bazaar_price"] = ei["bazaar_price"]
                             items_dict[name_key]["price"] = ei["price"]
-                except Exception:
+                except (json.JSONDecodeError, KeyError, TypeError):
                     pass
 
             final_list = list(items_dict.values())
             await redis.set(REDIS_PRICE_KEY, json.dumps(final_list, ensure_ascii=False), ex=86400)
-            logger.info("Successfully synced %d market prices to Redis", len(final_list))
+            logger.info("Synced %d market prices to Redis", len(final_list))
             return {"status": "ok", "items_count": len(final_list)}
 
-        except Exception as exc:
+        except aioredis.RedisError as exc:
             logger.error("Price sync error: %s", exc)
             return {"status": "error", "error": str(exc)}
 
@@ -92,10 +90,10 @@ class PriceCronService:
                 data = await redis.get(REDIS_PRICE_KEY)
                 if data:
                     return json.loads(data)
-            except Exception as exc:
+            except (aioredis.RedisError, json.JSONDecodeError) as exc:
                 logger.warning("Failed to fetch prices from Redis: %s", exc)
 
-        return DEFAULT_GULISTON_PRICES
+        return DEFAULT_LOCAL_PRICES
 
     @classmethod
     async def autocomplete(cls, query: str, redis: Optional[aioredis.Redis], limit: int = 6) -> list[dict[str, Any]]:
@@ -138,7 +136,7 @@ class PriceCronService:
                 "name": item_name.strip().capitalize(),
                 "price": new_price,
                 "bazaar_price": new_price,
-                "korzinka_price": new_price * 1.15,
+                "supermarket_price": new_price * 1.15,
                 "unit": "кг",
                 "category": "🥦 Овощные ряды",
                 "crowdsourced": True,
@@ -147,7 +145,7 @@ class PriceCronService:
         if redis:
             try:
                 await redis.set(REDIS_PRICE_KEY, json.dumps(all_prices, ensure_ascii=False), ex=86400)
-            except Exception as exc:
+            except aioredis.RedisError as exc:
                 logger.warning("Failed to update price in Redis: %s", exc)
 
         return True

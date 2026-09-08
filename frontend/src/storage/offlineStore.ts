@@ -1,11 +1,12 @@
 /**
  * OmniCart AI — Offline Storage Layer (v3)
- * Schema-versioned localStorage with proper queue management.
+ * Schema-versioned localStorage with proper queue management and conflict resolution.
  * 
- * Key fixes over v2:
+ * Features:
  * - Queue items are only removed AFTER successful API call
- * - Uses client-generated UUID v4 (no more opt_ prefix)
- * - Proper reconciliation support
+ * - Uses client-generated UUID v4
+ * - Conflict resolution with timestamp comparison (server vs local last-write-wins)
+ * - Corrupted cache recovery & event listener
  */
 
 import type { CartItem, SyncMutation } from "../types";
@@ -26,6 +27,22 @@ const EMPTY_STATE: OfflineStorageSchema = {
   pendingSyncQueue: [],
   lastSyncedAt: null,
 };
+
+export type CorruptedCacheHandler = (recoveredCount: number) => void;
+let corruptedCacheListener: CorruptedCacheHandler | null = null;
+
+/**
+ * Register a callback triggered when local storage cache corruption is detected.
+ * Returns an unregister function.
+ */
+export function onCorruptedCache(handler: CorruptedCacheHandler): () => void {
+  corruptedCacheListener = handler;
+  return () => {
+    if (corruptedCacheListener === handler) {
+      corruptedCacheListener = null;
+    }
+  };
+}
 
 function isValid(data: unknown): data is OfflineStorageSchema {
   if (typeof data !== "object" || data === null) return false;
@@ -57,11 +74,35 @@ export const offlineStore = {
     try {
       const raw = localStorage.getItem(STORAGE_KEY);
       if (!raw) return { ...EMPTY_STATE };
-      const parsed = JSON.parse(raw);
-      if (!isValid(parsed)) {
-        console.warn("[offlineStore] corrupted cache, resetting");
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(raw);
+      } catch {
+        console.warn("[offlineStore] corrupted JSON cache, resetting");
         this._write(EMPTY_STATE);
+        if (corruptedCacheListener) corruptedCacheListener(0);
         return { ...EMPTY_STATE };
+      }
+
+      if (!isValid(parsed)) {
+        console.warn("[offlineStore] corrupted cache schema, attempting recovery");
+        let recoveredQueue: SyncMutation[] = [];
+        const candidate = parsed as Record<string, unknown> | null;
+        if (candidate && Array.isArray(candidate.pendingSyncQueue)) {
+          recoveredQueue = candidate.pendingSyncQueue.filter(
+            (m: any) => m && typeof m === "object" && typeof m.id === "string" && m.item
+          );
+        }
+        const recoveredState: OfflineStorageSchema = {
+          version: CURRENT_VERSION,
+          items: candidate && Array.isArray(candidate.items) ? (candidate.items as CartItem[]) : [],
+          pendingSyncQueue: recoveredQueue,
+          lastSyncedAt: typeof candidate?.lastSyncedAt === "number" ? candidate.lastSyncedAt : null,
+        };
+        this._write(recoveredState);
+        if (corruptedCacheListener) corruptedCacheListener(recoveredQueue.length);
+        return recoveredState;
       }
       return parsed;
     } catch {
@@ -196,9 +237,10 @@ export const offlineStore = {
   },
 
   /**
-   * Reconcile server items with local pending mutations.
-   * Server items are the source of truth, but pending local mutations
-   * are preserved (items that exist in queue but not on server yet).
+   * Reconcile server items with local pending mutations using timestamp-based conflict resolution.
+   * - Server items are the source of truth for baseline state.
+   * - Pending local mutations are preserved if newer than server.
+   * - Server changes overwrite local state if server has a newer timestamp.
    */
   reconcile(serverItems: CartItem[]): CartItem[] {
     const state = this._read();
@@ -212,20 +254,41 @@ export const offlineStore = {
         .map((m) => m.item.id)
     );
 
-    const pendingToggles = new Map(
-      state.pendingSyncQueue
-        .filter((m) => m.action === "UPDATE")
-        .map((m) => [m.item.id, m.item.is_purchased])
-    );
+    // Map of itemId -> most recent UPDATE mutation
+    const pendingUpdates = new Map<string, SyncMutation>();
+    for (const m of state.pendingSyncQueue) {
+      if (m.action === "UPDATE" && m.item?.id) {
+        const existing = pendingUpdates.get(m.item.id);
+        if (!existing || (m.clientTimestamp || 0) >= (existing.clientTimestamp || 0)) {
+          pendingUpdates.set(m.item.id, m);
+        }
+      }
+    }
 
-    // Start with server items, apply pending mutations
-    let merged = serverItems
+    // Start with server items, filter out deleted, apply conflicts
+    const merged = serverItems
       .filter((si) => !pendingDeletes.has(si.id))
       .map((si) => {
-        if (pendingToggles.has(si.id)) {
-          return { ...si, is_purchased: pendingToggles.get(si.id)! };
+        const localMutation = pendingUpdates.get(si.id);
+        if (!localMutation) {
+          return si;
         }
-        return si;
+
+        const serverTime = si.updated_at ?? (si.created_at ? Date.parse(si.created_at) : 0);
+        const localTime = localMutation.clientTimestamp ?? localMutation.item.updated_at ?? 0;
+
+        // If server is newer, server wins
+        if (serverTime > localTime) {
+          return si;
+        }
+
+        return {
+          ...si,
+          is_purchased: localMutation.item.is_purchased,
+          quantity: localMutation.item.quantity || si.quantity,
+          price_paid: localMutation.item.price_paid || si.price_paid,
+          updated_at: localTime,
+        };
       });
 
     // Add locally-created items that aren't on server yet

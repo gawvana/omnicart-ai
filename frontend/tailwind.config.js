@@ -8,43 +8,69 @@ export default {
   theme: {
     extend: {
       colors: {
-        background: "#000000",
-        surface: "#0A0A0C",
-        "surface-raised": "#121216",
-        "surface-elevated": "#1A1A20",
-        "surface-overlay": "rgba(255, 255, 255, 0.04)",
-        "ios-border": "rgba(255, 255, 255, 0.08)",
-        "ios-border-active": "rgba(255, 255, 255, 0.18)",
-        zinc: {
-          900: "#0F0F12",
-          800: "#1A1A20",
-          700: "#272730",
-          600: "#3F3F4A",
-          500: "#71717A",
-          400: "#A1A1AA",
-          300: "#D4D4D8",
-          200: "#E4E4E7",
-          100: "#F4F4F5",
+        // Surface tokens (reference CSS vars from index.css)
+        bg: "var(--color-bg)",
+        surface: "var(--color-surface)",
+        "surface-elevated": "var(--color-surface-elevated)",
+        "surface-pressed": "var(--color-surface-pressed)",
+        "surface-overlay": "var(--color-surface-overlay)",
+
+        // Text tokens
+        primary: "var(--color-text)",
+        secondary: "var(--color-text-secondary)",
+        tertiary: "var(--color-text-tertiary)",
+        muted: "var(--color-text-muted)",
+
+        // Semantic tokens
+        accent: {
+          DEFAULT: "var(--color-accent)",
+          soft: "var(--color-accent-soft)",
+          hover: "var(--color-accent-hover)",
         },
+        destructive: {
+          DEFAULT: "var(--color-destructive)",
+          soft: "var(--color-destructive-soft)",
+        },
+        warning: "var(--color-warning)",
+        info: "var(--color-info)",
+
+        // Border tokens
+        "border-default": "var(--color-border)",
+        "border-strong": "var(--color-border-strong)",
       },
       fontFamily: {
         sans: [
+          "Inter",
           "-apple-system",
           "BlinkMacSystemFont",
           "SF Pro Display",
           "SF Pro Text",
-          "Inter",
           "system-ui",
           "sans-serif",
         ],
       },
       borderRadius: {
-        "ios": "1.25rem",
-        "ios-lg": "1.75rem",
-        "ios-xl": "2.25rem",
+        sm: "var(--radius-sm)",
+        md: "var(--radius-md)",
+        lg: "var(--radius-lg)",
+        xl: "var(--radius-xl)",
+        full: "var(--radius-full)",
+      },
+      spacing: {
+        "safe-t": "var(--sat)",
+        "safe-b": "var(--sab)",
       },
       backdropBlur: {
-        "ios": "24px",
+        ios: "24px",
+      },
+      transitionTimingFunction: {
+        default: "var(--ease-default)",
+        spring: "var(--ease-spring)",
+      },
+      transitionDuration: {
+        fast: "var(--duration-fast)",
+        normal: "var(--duration-normal)",
+        slow: "var(--duration-slow)",
       },
     },
   },
